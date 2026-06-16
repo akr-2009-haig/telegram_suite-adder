@@ -48,8 +48,6 @@ def settings_menu():
         elif choice == "0": break
 
 
-
-
 def set_limit(key: str, label: str, default: str):
     print_header(f"  {label}")
     cfg = config.load_settings()
@@ -177,7 +175,11 @@ def reset_defaults():
     print_warn("This will reset ALL settings to defaults (keeps API keys).")
     if not confirm("  Are you sure?"):
         return
-    cfg = config.load_settings()
+    # حفظ بيانات API قبل الإعادة
+    current = config.load_settings()
+    defaults = config.default_settings()
+    defaults["notif_bot_token"] = current.get("notif_bot_token", "")
+    defaults["notif_chat_id"]   = current.get("notif_chat_id", "")
     config.save_settings(defaults)
     print_success("Settings reset to defaults.")
     input("\n  Press ENTER...")
