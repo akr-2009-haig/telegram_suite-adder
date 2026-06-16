@@ -11,31 +11,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+# ─── نظام القفل الذكي — يجب أن يكون أول شيء يُنفَّذ ─────────────────────────
+from modules.device_lock import check_device_lock
+
 import config
 from modules.utils import (
     console, print_banner, print_header, print_success, print_error,
     print_info, print_warn, prompt, menu_choice, confirm, now_str,
 )
 from modules.database import load_accounts, load_proxies, get_today_stats, get_unread_notifications
-
-
-# ─── Tool Password Check ─────────────────────────────────────────────────────
-
-def check_tool_password():
-    cfg = config.load_settings()
-    stored = cfg.get("tool_password")
-    if not stored:
-        return True
-    import hashlib, getpass
-    try:
-        pw  = getpass.getpass("  🔐 Tool Password: ")
-        hsh = hashlib.sha256(pw.encode()).hexdigest()
-        if hsh == stored:
-            return True
-        print_error("Wrong password. Exiting.")
-        sys.exit(1)
-    except (KeyboardInterrupt, EOFError):
-        sys.exit(0)
 
 
 # ─── Night Mode Check ─────────────────────────────────────────────────────────
@@ -170,7 +154,7 @@ def main_menu():
 
 if __name__ == "__main__":
     try:
-        check_tool_password()
+        check_device_lock()
         main_menu()
     except KeyboardInterrupt:
         console.print("\n\n  [dim]Interrupted. Goodbye![/dim]\n")
