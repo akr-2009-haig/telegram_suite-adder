@@ -161,22 +161,61 @@ async def test_all_proxies():
 
 
 async def _test_single_proxy(proxy_id: int):
+    """
+    اختبار حقيقي للبروكسي حسب بروتوكوله:
+    - SOCKS5: مصافحة SOCKS5 كاملة (\x05\x01\x00 → \x05\x00)
+    - SOCKS4: مصافحة SOCKS4
+    - HTTP:   طلب CONNECT وانتظار 200
+    """
     proxies = load_proxies()
     p = next((x for x in proxies if x["id"] == proxy_id), None)
     if not p:
         return
-    console.print(f"  Testing {p['host']}:{p['port']}...", end=" ")
+
+    ptype = p.get("type", "socks5").lower()
+    host  = p["host"]
+    port  = p["port"]
+    console.print(f"  [{ptype.upper()}] {host}:{port}...", end=" ")
+
     try:
         import socket
         start = time.time()
-        sock = socket.create_connection((p["host"], p["port"]), timeout=8)
+        sock  = socket.create_connection((host, port), timeout=8)
+        sock.settimeout(8)
+
+        if ptype == "socks5":
+            # مصافحة SOCKS5: لا مصادقة
+            sock.sendall(b"\x05\x01\x00")
+            resp = sock.recv(2)
+            if len(resp) < 2 or resp[0] != 0x05 or resp[1] == 0xFF:
+                sock.close()
+                raise ConnectionError("SOCKS5 handshake rejected")
+
+        elif ptype == "socks4":
+            # مصافحة SOCKS4 — اتصال بـ 1.1.1.1:80
+            sock.sendall(b"\x04\x01\x00\x50\x01\x01\x01\x01\x00")
+            resp = sock.recv(8)
+            if len(resp) < 2 or resp[1] != 0x5A:
+                sock.close()
+                raise ConnectionError("SOCKS4 handshake rejected")
+
+        elif ptype in ("http", "https"):
+            # اختبار HTTP CONNECT
+            req = b"CONNECT api.telegram.org:443 HTTP/1.1\r\nHost: api.telegram.org:443\r\n\r\n"
+            sock.sendall(req)
+            resp = sock.recv(64).decode("utf-8", errors="ignore")
+            if "200" not in resp and "connection established" not in resp.lower():
+                sock.close()
+                raise ConnectionError(f"HTTP proxy rejected: {resp[:40]}")
+
         sock.close()
         ping_ms = int((time.time() - start) * 1000)
-        update_proxy(proxy_id, {"status":"alive","ping_ms":ping_ms,"last_checked":now_str()})
+        update_proxy(proxy_id, {"status": "alive", "ping_ms": ping_ms, "last_checked": now_str()})
         console.print(f"[green]✅ alive ({ping_ms}ms)[/green]")
+
     except Exception as e:
-        update_proxy(proxy_id, {"status":"dead","last_checked":now_str()})
-        console.print(f"[red]❌ dead — {str(e)[:30]}[/red]")
+        update_proxy(proxy_id, {"status": "dead", "last_checked": now_str()})
+        console.print(f"[red]❌ dead — {str(e)[:40]}[/red]")
 
 
 def assign_proxy_to_account():
@@ -254,7 +293,6 @@ def remove_dead_proxies():
 
 def auto_rotate_settings():
     print_header("🔄  Auto-Rotate Proxies")
-    cfg = config.load_settings() if hasattr(__import__("config"), "load_settings") else {}
     import config as _cfg
     cfg = _cfg.load_settings()
     console.print("  When auto-rotate is enabled, proxies are cycled periodically\n")
