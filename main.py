@@ -19,42 +19,6 @@ from modules.utils import (
 from modules.database import load_accounts, load_proxies, get_today_stats, get_unread_notifications
 
 
-# ─── First-Run Setup ─────────────────────────────────────────────────────────
-
-def first_run_setup():
-    api_id, api_hash = config.get_api_credentials()
-    if api_id and api_hash:
-        return
-
-    print_banner()
-    console.print()
-    console.print("  [bold yellow]⚙️  First-Time Setup Required[/bold yellow]")
-    console.print()
-    console.print("  ┌────────────────────────────────────────────────────────┐")
-    console.print("  │  You need a Telegram API ID and Hash to continue.      │")
-    console.print("  │                                                        │")
-    console.print("  │  Get them FREE at:  https://my.telegram.org/apps       │")
-    console.print("  │                                                        │")
-    console.print("  │  Steps:                                                │")
-    console.print("  │  1. Log in with your Telegram account                  │")
-    console.print("  │  2. Click  Create Application                          │")
-    console.print("  │  3. Copy your API ID and API Hash                      │")
-    console.print("  └────────────────────────────────────────────────────────┘")
-    console.print()
-
-    api_id   = prompt("  🔑 Enter API ID")
-    api_hash = prompt("  🔑 Enter API Hash")
-
-    if not api_id or not api_hash:
-        print_error("API credentials are required. Exiting.")
-        sys.exit(1)
-
-    config.save_api_credentials(api_id.strip(), api_hash.strip())
-    print_success("Credentials saved — you won't be asked again.")
-    console.print()
-    input("  Press ENTER to continue...")
-
-
 # ─── Tool Password Check ─────────────────────────────────────────────────────
 
 def check_tool_password():
@@ -206,7 +170,6 @@ def main_menu():
 
 if __name__ == "__main__":
     try:
-        first_run_setup()
         check_tool_password()
         main_menu()
     except KeyboardInterrupt:
