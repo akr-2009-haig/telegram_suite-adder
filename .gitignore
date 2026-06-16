@@ -1,0 +1,30 @@
+# بيانات اتصال تيليجرام — لا ترفع أبداً
+.env
+
+# ملفات الجلسات والبيانات
+sessions/
+data/
+exports/
+logs/
+backups/
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# PyArmor
+dist_obf/
+pyarmor_runtime*/
+
+# متفرقات
+emergency.flag
+*.log
+*.bak
