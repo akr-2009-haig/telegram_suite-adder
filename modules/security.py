@@ -353,14 +353,30 @@ async def honeypot_check():
                 warnings.append("⚠️  Very large group — mass surveillance possible")
             if not username:
                 warnings.append("ℹ️  No public username — may be a closed trap")
-            if participants_count > 0:
+            if participants_count > 0 and participants_count < 10000:
                 try:
-                    admins = await client.get_participants(entity, filter=None)
-                    bot_count = sum(1 for a in admins if getattr(a, "bot", False))
+                    from telethon.tl.types import ChannelParticipantsBots
+                    bots = await client.get_participants(entity, filter=ChannelParticipantsBots())
+                    bot_count = len(bots)
+                    console.print(f"  Bots in group : [dim]{bot_count}[/dim]")
                     if bot_count > 5:
-                        warnings.append(f"⚠️  {bot_count} bots detected in the group")
+                        warnings.append(f"⚠️  {bot_count} bots detected — possible monitoring setup")
+                    bot_ratio = bot_count / max(participants_count, 1)
+                    if bot_ratio > 0.1:
+                        warnings.append(f"⚠️  High bot ratio: {bot_ratio:.0%} — possible bot farm")
                 except Exception:
                     pass
+            # Check recent message activity
+            try:
+                msgs = await client.get_messages(entity, limit=20)
+                if msgs:
+                    from datetime import datetime, timezone
+                    now_dt = datetime.now(timezone.utc)
+                    ages = [(now_dt - m.date).total_seconds() / 3600 for m in msgs if m.date]
+                    if ages and min(ages) > 72:
+                        warnings.append("ℹ️  No messages in 72h — group may be inactive/trap")
+            except Exception:
+                pass
 
     except Exception as e:
         print_error(f"Could not analyze: {e}")
@@ -402,27 +418,26 @@ async def bulk_2fa_setup():
         return
 
     api_id, api_hash = config.get_api_credentials()
-    ok = fail = 0
+    ok = fail = already = 0
     for acc in accounts:
         session = str(config.SESSIONS_DIR / acc["phone"])
         try:
             from telethon import TelegramClient
-            from telethon.tl.functions.account import UpdatePasswordSettingsRequest, GetPasswordRequest
-            from telethon.tl.types import InputCheckPasswordEmpty, account
             async with TelegramClient(session, int(api_id), api_hash) as client:
-                await client(UpdatePasswordSettingsRequest(
-                    password=InputCheckPasswordEmpty(),
-                    new_settings=account.PasswordInputSettings(
-                        new_algo=None, new_password_hash=None, hint=None
-                    )
-                ))
+                # edit_2fa(new_password=pw) sets 2FA; if already set it updates it
+                await client.edit_2fa(new_password=pw, hint="suite")
                 ok += 1
                 console.print(f"  [green]✅ {acc['phone']}[/green]")
         except Exception as e:
-            fail += 1
-            console.print(f"  [red]❌ {acc['phone']}: {str(e)[:40]}[/red]")
+            err = str(e)
+            if "PASSWORD_HASH_INVALID" in err or "NEW_SALT_INVALID" in err:
+                already += 1
+                console.print(f"  [yellow]⚠️  {acc['phone']}: already has 2FA[/yellow]")
+            else:
+                fail += 1
+                console.print(f"  [red]❌ {acc['phone']}: {err[:50]}[/red]")
 
-    console.print(f"\n  Done: [green]{ok} set[/green]  |  [red]{fail} failed[/red]")
+    console.print(f"\n  Done: [green]{ok} set[/green]  |  [yellow]{already} already had 2FA[/yellow]  |  [red]{fail} failed[/red]")
     input("\n  Press ENTER...")
 
 
