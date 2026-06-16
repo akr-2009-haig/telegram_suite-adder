@@ -16,7 +16,7 @@ from modules.utils import (
     console, print_banner, print_header, print_success, print_error,
     print_info, print_warn, prompt, menu_choice, confirm, now_str,
 )
-from modules.database import load_accounts, load_proxies, get_today_stats
+from modules.database import load_accounts, load_proxies, get_today_stats, get_unread_notifications
 
 
 # ─── First-Run Setup ─────────────────────────────────────────────────────────
@@ -33,11 +33,11 @@ def first_run_setup():
     console.print("  ┌────────────────────────────────────────────────────────┐")
     console.print("  │  You need a Telegram API ID and Hash to continue.      │")
     console.print("  │                                                        │")
-    console.print("  │  Get them FREE at: https://my.telegram.org/apps        │")
+    console.print("  │  Get them FREE at:  https://my.telegram.org/apps       │")
     console.print("  │                                                        │")
     console.print("  │  Steps:                                                │")
     console.print("  │  1. Log in with your Telegram account                  │")
-    console.print("  │  2. Click 'Create Application'                         │")
+    console.print("  │  2. Click  Create Application                          │")
     console.print("  │  3. Copy your API ID and API Hash                      │")
     console.print("  └────────────────────────────────────────────────────────┘")
     console.print()
@@ -50,36 +50,74 @@ def first_run_setup():
         sys.exit(1)
 
     config.save_api_credentials(api_id.strip(), api_hash.strip())
-    print_success("Credentials saved to .env — you won't be asked again.")
+    print_success("Credentials saved — you won't be asked again.")
     console.print()
     input("  Press ENTER to continue...")
+
+
+# ─── Tool Password Check ─────────────────────────────────────────────────────
+
+def check_tool_password():
+    cfg = config.load_settings()
+    stored = cfg.get("tool_password")
+    if not stored:
+        return True
+    import hashlib, getpass
+    try:
+        pw  = getpass.getpass("  🔐 Tool Password: ")
+        hsh = hashlib.sha256(pw.encode()).hexdigest()
+        if hsh == stored:
+            return True
+        print_error("Wrong password. Exiting.")
+        sys.exit(1)
+    except (KeyboardInterrupt, EOFError):
+        sys.exit(0)
+
+
+# ─── Night Mode Check ─────────────────────────────────────────────────────────
+
+def is_night_mode_active() -> bool:
+    cfg  = config.load_settings()
+    if not cfg.get("night_mode"):
+        return False
+    from datetime import datetime
+    h = datetime.now().hour
+    return h >= 0 and h < 7
 
 
 # ─── Status Bar ──────────────────────────────────────────────────────────────
 
 def print_status_bar():
-    accounts = load_accounts()
-    proxies  = load_proxies()
-    stats    = get_today_stats()
+    accounts   = load_accounts()
+    proxies    = load_proxies()
+    stats      = get_today_stats()
+    unread     = len(get_unread_notifications())
 
-    total   = len(accounts)
-    active  = sum(1 for a in accounts if a.get("status") == "active")
-    banned  = sum(1 for a in accounts if a.get("status") in ("banned", "restricted"))
+    total      = len(accounts)
+    active     = sum(1 for a in accounts if a.get("status") == "active")
+    banned     = sum(1 for a in accounts if a.get("status") in ("banned","restricted"))
     prx_active = sum(1 for p in proxies if p.get("status") == "alive")
 
-    imp_today = stats.get("import",     {}).get("successful", 0)
-    col_today = stats.get("collection", {}).get("total_collected", 0)
-    msg_today = stats.get("message",    {}).get("sent", 0)
+    col_today  = stats.get("scrape",   {}).get("total", 0)
+    add_today  = stats.get("add",      {}).get("success", 0)
+    msg_today  = stats.get("messages", {}).get("sent", 0)
+
+    night_warn = "  [bold yellow]🌙 Night Mode Active — Operations Paused[/bold yellow]\n" if is_night_mode_active() else ""
+    emrg_warn  = "  [bold red]🚨 EMERGENCY MODE ACTIVE — Delete emergency.flag to resume[/bold red]\n" if Path("emergency.flag").exists() else ""
+    notif_line = f"  [bold yellow]🔔 {unread} unread notification(s)[/bold yellow]\n" if unread else ""
 
     console.print()
-    console.print("  ┌──────────────────────────────────────────────────────────┐")
-    console.print(f"  │  Connected Accounts : [bold green]{active}[/bold green] / {total}   "
-                  f"  Banned: [bold red]{banned}[/bold red]   "
-                  f"  Proxies: [bold cyan]{prx_active}[/bold cyan]        │")
-    console.print(f"  │  Today — Collected: [cyan]{col_today}[/cyan]   "
-                  f"Imported: [green]{imp_today}[/green]   "
-                  f"Messages: [yellow]{msg_today}[/yellow]              │")
-    console.print("  └──────────────────────────────────────────────────────────┘")
+    if night_warn: console.print(night_warn, end="")
+    if emrg_warn:  console.print(emrg_warn,  end="")
+    if notif_line: console.print(notif_line, end="")
+    console.print("  ┌──────────────────────────────────────────────────────────────┐")
+    console.print(f"  │  Accounts: [bold green]{active}[/bold green] active / [dim]{total}[/dim] total   "
+                  f"Banned: [bold red]{banned}[/bold red]   "
+                  f"Proxies: [bold cyan]{prx_active}[/bold cyan]       │")
+    console.print(f"  │  Today — Scraped: [cyan]{col_today:,}[/cyan]   "
+                  f"Added: [green]{add_today:,}[/green]   "
+                  f"Messages: [yellow]{msg_today:,}[/yellow]            │")
+    console.print("  └──────────────────────────────────────────────────────────────┘")
     console.print()
 
 
@@ -90,23 +128,27 @@ def main_menu():
         print_banner()
         print_status_bar()
 
-        console.print("  ┌─── Main Menu ────────────────────────────────────────────┐")
-        console.print("  │                                                          │")
-        console.print("  │  [bold cyan][ 1][/bold cyan]  👤  Account Manager                                   │")
-        console.print("  │  [bold cyan][ 2][/bold cyan]  📥  Member Scraper                                    │")
-        console.print("  │  [bold cyan][ 3][/bold cyan]  📤  Member Adder                                      │")
-        console.print("  │  [bold cyan][ 4][/bold cyan]  🔄  Rotation System                                   │")
-        console.print("  │  [bold cyan][ 5][/bold cyan]  🌐  Proxy Manager                                     │")
-        console.print("  │  [bold cyan][ 6][/bold cyan]  ⚙️   Settings                                          │")
-        console.print("  │  [bold cyan][ 7][/bold cyan]  📊  Reports & Logs                                    │")
-        console.print("  │  [bold cyan][ 8][/bold cyan]  🛡️   Security Tools                                    │")
-        console.print("  │  [bold cyan][ 9][/bold cyan]  💬  Bulk Messaging                                    │")
-        console.print("  │  [bold cyan][10][/bold cyan]  📢  Outreach Campaigns                                │")
-        console.print("  │                                                          │")
-        console.print("  │  [dim][ 0]  🚪  Exit[/dim]                                            │")
-        console.print("  ├──────────────────────────────────────────────────────────┤")
-        console.print("  │  [dim]By: Akram Haig  |  +967772009303[/dim]                        │")
-        console.print("  └──────────────────────────────────────────────────────────┘")
+        console.print("  ┌─── Main Menu ──────────────────────────────────────────────┐")
+        console.print("  │                                                            │")
+        console.print("  │  [bold cyan][ 1][/bold cyan]  👤  Account Manager                                     │")
+        console.print("  │  [bold cyan][ 2][/bold cyan]  📥  Member Scraper                                      │")
+        console.print("  │  [bold cyan][ 3][/bold cyan]  📤  Member Adder                                        │")
+        console.print("  │  [bold cyan][ 4][/bold cyan]  🔄  Rotation System                                     │")
+        console.print("  │  [bold cyan][ 5][/bold cyan]  🌐  Proxy Manager                                       │")
+        console.print("  │  [bold cyan][ 6][/bold cyan]  ⚙️   Settings                                            │")
+        console.print("  │  [bold cyan][ 7][/bold cyan]  📊  Reports & Logs                                      │")
+        console.print("  │  [bold cyan][ 8][/bold cyan]  🛡️   Security Tools                                      │")
+        console.print("  │  [bold cyan][ 9][/bold cyan]  💬  Bulk Messaging                                      │")
+        console.print("  │  [bold cyan][10][/bold cyan]  📢  Outreach Campaigns                                  │")
+        console.print("  │  [bold cyan][11][/bold cyan]  🤖  Auto-Reply System                                   │")
+        console.print("  │  [bold cyan][12][/bold cyan]  📅  Task Scheduler                                      │")
+        console.print("  │  [bold cyan][13][/bold cyan]  🔔  Notification Center                                 │")
+        console.print("  │  [bold cyan][14][/bold cyan]  📦  Backup & Restore                                    │")
+        console.print("  │                                                            │")
+        console.print("  │  [dim][ 0]  🚪  Exit[/dim]                                              │")
+        console.print("  ├────────────────────────────────────────────────────────────┤")
+        console.print("  │  [dim]By: Akram Haig  |  +967772009303[/dim]                          │")
+        console.print("  └────────────────────────────────────────────────────────────┘")
         console.print()
 
         choice = prompt("  ❯").strip()
@@ -141,11 +183,23 @@ def main_menu():
         elif choice == "10":
             from modules.campaigns import campaigns_menu
             campaigns_menu()
+        elif choice == "11":
+            from modules.auto_reply import auto_reply_menu
+            auto_reply_menu()
+        elif choice == "12":
+            from modules.scheduler import scheduler_menu
+            scheduler_menu()
+        elif choice == "13":
+            from modules.notifications import notifications_menu
+            notifications_menu()
+        elif choice == "14":
+            from modules.backup import backup_menu
+            backup_menu()
         elif choice == "0":
             console.print("\n  [bold]Goodbye! 👋[/bold]\n")
             sys.exit(0)
         else:
-            print_error("Invalid option. Enter a number from the menu.")
+            print_error("Invalid option — enter a number from the menu.")
 
 
 # ─── Entry Point ─────────────────────────────────────────────────────────────
@@ -153,9 +207,10 @@ def main_menu():
 if __name__ == "__main__":
     try:
         first_run_setup()
+        check_tool_password()
         main_menu()
     except KeyboardInterrupt:
-        console.print("\n\n  [dim]Interrupted by user. Goodbye![/dim]\n")
+        console.print("\n\n  [dim]Interrupted. Goodbye![/dim]\n")
         sys.exit(0)
     except Exception as e:
         console.print(f"\n  [bold red]Fatal error:[/bold red] {e}")
