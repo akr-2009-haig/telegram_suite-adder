@@ -1,383 +1,396 @@
 import asyncio
-import csv
 import random
+import time
 from pathlib import Path
-from datetime import datetime
-from telethon import TelegramClient
-from telethon.errors import (
-    FloodWaitError, UserPrivacyRestrictedError, InputUserDeactivatedError,
-    PeerFloodError, UserIsBlockedError,
-)
-
-import config
 from modules.utils import (
-    console, print_header, print_success, print_error, print_warn,
-    print_info, prompt, menu_choice, confirm, now_str, date_str, wait_countdown,
+    console, print_header, print_success, print_error, print_info, print_warn,
+    prompt, menu_choice, confirm, now_str,
 )
 from modules.database import (
-    get_active_accounts, increment_account_counter, increment_stat,
-    is_blacklisted, load_proxies,
+    load_accounts, get_active_accounts, increment_stat,
+    load_templates, save_templates, add_template, delete_template,
 )
-
-EXPORTS_DIR = config.EXPORTS_DIR
-LOGS_DIR    = config.LOGS_DIR
+from modules.security import is_emergency
+import config
 
 
 def bulk_messaging_menu():
     while True:
         print_header("💬  Bulk Messaging", "Send messages to multiple users")
+
         choice = menu_choice([
-            ("1", "📋  Send to User List (CSV)"),
-            ("2", "✍️  Send to Specific Usernames"),
-            ("3", "🔄  Send to Group Members"),
-            ("4", "🕐  Scheduled Messaging"),
-            ("5", "📊  Messaging Logs"),
+            ("1", "📝  Compose & Send New Message"),
+            ("2", "📋  Select Recipients List"),
+            ("3", "📂  Import Recipients from File"),
+            ("4", "⏰  Schedule Message"),
+            ("5", "📊  Message History / Log"),
+            ("6", "📎  Send with Media (Photo / Video / File)"),
+            ("7", "🔄  Message Templates"),
+            ("8", "🎲  Spin / Rotate Message Variants"),
+            ("9", "📈  Read Rate Tracker"),
+        ])
+
+        if choice == "1":   asyncio.run(compose_and_send())
+        elif choice == "2": select_recipients()
+        elif choice == "3": import_recipients()
+        elif choice == "4": schedule_message()
+        elif choice == "5": message_history()
+        elif choice == "6": asyncio.run(send_with_media())
+        elif choice == "7": templates_menu()
+        elif choice == "8": spin_message_menu()
+        elif choice == "9": read_rate_menu()
+        elif choice == "0": break
+
+
+# ─── 1. Compose & Send ────────────────────────────────────────────────────────
+
+async def compose_and_send(recipients: list = None, text: str = None, media_path: str = None):
+    print_header("📝  Compose & Send")
+
+    if text is None:
+        console.print("  Available variables: {first_name}, {last_name}, {username}\n")
+        text = prompt("  Message text")
+        if not text:
+            return
+
+    if recipients is None:
+        src = prompt("  Recipients CSV file (ENTER to enter usernames manually)")
+        if src and Path(src).exists():
+            recipients = _load_recipients_file(src)
+        else:
+            console.print("  Enter usernames (one per line, blank to finish):")
+            recipients = []
+            while True:
+                line = prompt(f"  [{len(recipients)+1}]", "")
+                if not line: break
+                recipients.append({"username": line.strip("@ ")})
+
+    if not recipients:
+        print_error("No recipients.")
+        input("\n  Press ENTER...")
+        return
+
+    accounts   = get_active_accounts()
+    if not accounts:
+        print_error("No active accounts.")
+        input("\n  Press ENTER...")
+        return
+
+    cfg       = config.load_settings()
+    delay_min = cfg.get("delay_min", 60)
+    delay_max = cfg.get("delay_max", 120)
+    msg_limit = cfg.get("msg_limit", 30)
+    api_id, api_hash = config.get_api_credentials()
+
+    console.print(f"\n  Recipients : [bold]{len(recipients)}[/bold]")
+    console.print(f"  Accounts   : [bold]{len(accounts)}[/bold] (rotating)")
+    console.print(f"  Delay      : [bold]{delay_min}–{delay_max}s[/bold]")
+    console.print(f"  Limit/acc  : [bold]{msg_limit}/day[/bold]")
+
+    if not confirm("\n  Start sending?"):
+        return
+
+    sent = failed = skipped = 0
+    log_path = Path("logs") / "messages.log"
+    log_path.parent.mkdir(exist_ok=True)
+
+    acc_idx   = 0
+    acc_count = 0
+
+    for i, rec in enumerate(recipients, 1):
+        if is_emergency():
+            print_warn("Emergency mode — stopping.")
+            break
+
+        # Rotate accounts
+        if acc_count >= msg_limit:
+            acc_idx   = (acc_idx + 1) % len(accounts)
+            acc_count = 0
+            wait = random.randint(300, 600)
+            console.print(f"  [cyan]Switching account — waiting {wait}s...[/cyan]")
+            await asyncio.sleep(wait)
+
+        acc     = accounts[acc_idx]
+        session = str(config.SESSIONS_DIR / acc["phone"])
+
+        username   = rec.get("username") or rec.get("user_id","")
+        first_name = rec.get("first_name","Friend")
+        last_name  = rec.get("last_name","")
+
+        personalized = text.replace("{first_name}", first_name)\
+                           .replace("{last_name}",  last_name)\
+                           .replace("{username}",   str(username))
+
+        progress = f"[{i}/{len(recipients)}]"
+        try:
+            from telethon import TelegramClient
+            client = TelegramClient(session, int(api_id), api_hash)
+            await client.connect()
+            if not await client.is_user_authorized():
+                skipped += 1
+                await client.disconnect()
+                continue
+
+            if media_path and Path(media_path).exists():
+                await client.send_file(username, media_path, caption=personalized)
+            else:
+                await client.send_message(username, personalized)
+
+            await client.disconnect()
+            sent += 1
+            acc_count += 1
+            increment_stat("messages","sent")
+            console.print(f"  {progress}  [green]✅[/green] @{username}")
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write(f"{now_str()} SUCCESS @{username} via {acc['phone']}\n")
+
+        except Exception as e:
+            failed += 1
+            err = str(e)[:40]
+            console.print(f"  {progress}  [red]❌[/red] @{username} — {err}")
+            increment_stat("messages","failed")
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write(f"{now_str()} FAILED @{username} — {err}\n")
+
+        if i < len(recipients):
+            delay = random.randint(delay_min, delay_max)
+            console.print(f"  [dim]Waiting {delay}s...[/dim]")
+            await asyncio.sleep(delay)
+
+    console.print(f"\n  ─── Summary ─────────────────────────")
+    console.print(f"  ✅ Sent    : [green]{sent}[/green]")
+    console.print(f"  ❌ Failed  : [red]{failed}[/red]")
+    console.print(f"  ⏭️  Skipped : [yellow]{skipped}[/yellow]")
+    input("\n  Press ENTER...")
+
+
+def _load_recipients_file(path: str) -> list:
+    import csv
+    recipients = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                recipients.append({
+                    "user_id":    row.get("user_id",""),
+                    "username":   row.get("username",""),
+                    "first_name": row.get("first_name",""),
+                    "last_name":  row.get("last_name",""),
+                })
+    except Exception as e:
+        print_error(f"Could not read file: {e}")
+    return recipients
+
+
+# ─── 2. Select Recipients ─────────────────────────────────────────────────────
+
+def select_recipients():
+    print_header("📋  Select Recipients")
+    exports = sorted(Path("exports").glob("*.csv")) if Path("exports").exists() else []
+    if not exports:
+        print_info("No exported CSV files found. Scrape members first.")
+        input("\n  Press ENTER...")
+        return
+    for i, f in enumerate(exports, 1):
+        size = f.stat().st_size // 1024
+        console.print(f"  [{i}] {f.name}  [dim]{size} KB[/dim]")
+    ch = prompt("\n  Select file #")
+    if ch.isdigit() and 1 <= int(ch) <= len(exports):
+        path = str(exports[int(ch)-1])
+        console.print(f"  [green]Selected: {path}[/green]")
+        console.print("  Now go to option 1 (Compose & Send) and enter this path.")
+    input("\n  Press ENTER...")
+
+
+# ─── 3. Import Recipients ─────────────────────────────────────────────────────
+
+def import_recipients():
+    print_header("📂  Import Recipients from File")
+    console.print("  Supported formats: CSV (with headers), TXT (one username per line)\n")
+    path = prompt("  File path")
+    if not path or not Path(path).exists():
+        print_error("File not found.")
+        input("\n  Press ENTER...")
+        return
+    if path.endswith(".csv"):
+        recs = _load_recipients_file(path)
+    else:
+        recs = [{"username": l.strip().strip("@")} for l in Path(path).read_text(encoding="utf-8").splitlines() if l.strip()]
+    print_success(f"Loaded {len(recs)} recipients from {Path(path).name}")
+    console.print("  Use option 1 (Compose & Send) and enter this file path.")
+    input("\n  Press ENTER...")
+
+
+# ─── 4. Schedule Message ──────────────────────────────────────────────────────
+
+def schedule_message():
+    print_header("⏰  Schedule Message")
+    console.print("  This creates a scheduled task — use the Scheduler (menu 12) to manage it.\n")
+    text = prompt("  Message text")
+    path = prompt("  Recipients CSV file")
+    date = prompt("  Date (YYYY-MM-DD)", __import__("datetime").datetime.now().strftime("%Y-%m-%d"))
+    time_str = prompt("  Time (HH:MM)", "09:00")
+    if text and path:
+        from modules.database import add_schedule
+        task_id = add_schedule({
+            "name":      f"Bulk message — {date} {time_str}",
+            "operation": "bulk_message",
+            "schedule":  f"{date} {time_str}",
+            "stype":     "1",
+            "params":    {"text": text, "source_file": path},
+            "notify":    True,
+        })
+        print_success(f"Scheduled as Task #{task_id}")
+    input("\n  Press ENTER...")
+
+
+# ─── 5. Message History ───────────────────────────────────────────────────────
+
+def message_history():
+    print_header("📊  Message History")
+    log_path = Path("logs") / "messages.log"
+    if not log_path.exists():
+        print_info("No message log found.")
+        input("\n  Press ENTER...")
+        return
+    lines = log_path.read_text(encoding="utf-8").strip().splitlines()
+    recent = lines[-40:]
+    for line in recent:
+        if "SUCCESS" in line:
+            console.print(f"  [green]{line}[/green]")
+        elif "FAILED" in line:
+            console.print(f"  [red]{line}[/red]")
+        else:
+            console.print(f"  [dim]{line}[/dim]")
+    console.print(f"\n  [dim]Showing last {len(recent)} of {len(lines)} lines[/dim]")
+    input("\n  Press ENTER...")
+
+
+# ─── 6. Send with Media ───────────────────────────────────────────────────────
+
+async def send_with_media():
+    print_header("📎  Send with Media")
+    console.print("  Supported: JPG, PNG, MP4, PDF, any file\n")
+    media_path = prompt("  Media file path")
+    if not media_path or not Path(media_path).exists():
+        print_error("File not found.")
+        input("\n  Press ENTER...")
+        return
+    caption = prompt("  Caption text (optional, use {first_name} etc.)")
+    src     = prompt("  Recipients CSV file")
+    recipients = _load_recipients_file(src) if src and Path(src).exists() else []
+    if not recipients:
+        print_error("No recipients.")
+        input("\n  Press ENTER...")
+        return
+    await compose_and_send(recipients=recipients, text=caption or "", media_path=media_path)
+
+
+# ─── 7. Templates ─────────────────────────────────────────────────────────────
+
+def templates_menu():
+    while True:
+        templates = load_templates()
+        print_header("🔄  Message Templates", f"{len(templates)} saved")
+        choice = menu_choice([
+            ("1", "➕  Create Template"),
+            ("2", "📋  View Templates"),
+            ("3", "📋  Use Template"),
+            ("4", "❌  Delete Template"),
         ])
         if choice == "1":
-            asyncio.run(send_from_csv())
+            name = prompt("  Template name")
+            text = prompt("  Template text (use {first_name} etc.)")
+            cat  = prompt("  Category (optional)", "general")
+            if name and text:
+                add_template(name, text, cat)
+                print_success("Template saved.")
+            input("\n  Press ENTER...")
         elif choice == "2":
-            asyncio.run(send_manual())
+            print_header("📋  Templates")
+            if not templates:
+                print_info("No templates.")
+            for t in templates:
+                console.print(f"  [dim]#{t['id']}[/dim]  [bold cyan]{t['name']:<25}[/bold cyan]  [white]{t['text'][:50]}[/white]")
+            input("\n  Press ENTER...")
         elif choice == "3":
-            asyncio.run(send_to_group_members())
+            if not templates:
+                print_info("No templates saved.")
+                input("\n  Press ENTER...")
+                continue
+            for t in templates:
+                console.print(f"  [{t['id']}] {t['name']}")
+            tid = prompt("  Template #")
+            if tid.isdigit():
+                tmpl = next((t for t in templates if t["id"] == int(tid)), None)
+                if tmpl:
+                    console.print(f"\n  Text: [cyan]{tmpl['text']}[/cyan]\n")
+                    templates_list = load_templates()
+                    for i, t in enumerate(templates_list):
+                        if t["id"] == int(tid):
+                            templates_list[i]["used_count"] = t.get("used_count",0)+1
+                    save_templates(templates_list)
+                    asyncio.run(compose_and_send(text=tmpl["text"]))
+                    return
+            input("\n  Press ENTER...")
         elif choice == "4":
-            asyncio.run(scheduled_messaging())
-        elif choice == "5":
-            view_messaging_logs()
+            for t in templates:
+                console.print(f"  [{t['id']}] {t['name']}")
+            tid = prompt("  Template # to delete")
+            if tid.isdigit():
+                delete_template(int(tid))
+                print_success("Deleted.")
+            input("\n  Press ENTER...")
         elif choice == "0":
             break
 
 
-def _build_client(account: dict) -> TelegramClient:
-    api_id, api_hash = config.get_api_credentials()
-    session = str(config.SESSIONS_DIR / account["phone"])
-    proxy = None
-    if account.get("proxy_id"):
-        for p in load_proxies():
-            if p["id"] == account["proxy_id"]:
-                try:
-                    import socks
-                    ptype = p.get("type", "socks5").lower()
-                    pt = socks.SOCKS5 if "socks5" in ptype else (socks.SOCKS4 if "socks4" in ptype else socks.HTTP)
-                    proxy = (pt, p["host"], int(p["port"]),
-                             True, p.get("username") or None, p.get("password") or None)
-                except Exception:
-                    pass
-                break
-    return TelegramClient(session, int(api_id), api_hash, proxy=proxy)
+# ─── 8. Spin / Rotate Variants ────────────────────────────────────────────────
+
+def spin_message_menu():
+    print_header("🎲  Message Spinning / Rotation")
+    console.print("  Enter {word1|word2|word3} to create variants.\n")
+    console.print("  Example: Hello {friend|buddy|mate}, check this {link|URL|page}!")
+    console.print("  Each recipient will get a different variant.\n")
+    text = prompt("  Message with spin syntax")
+    if not text:
+        return
+    count = int(prompt("  Preview how many variants?", "3") or 3)
+    console.print(f"\n  ─── {count} Sample Variants ───────────────")
+    for i in range(count):
+        spun = _spin(text)
+        console.print(f"  [{i+1}] {spun}")
+    console.print()
+    if confirm("  Use this for sending?"):
+        asyncio.run(compose_and_send(text=text))
 
 
-def _configure_msg_settings() -> dict | None:
-    console.print("\n  ─── Account Selection ────────────────────")
-    active = get_active_accounts()
-    if not active:
-        print_error("No active accounts.")
-        return None
-
-    console.print(f"  [1] Single Account")
-    console.print(f"  [2] Rotate Between All ({len(active)} accounts)  ⭐")
-    mode = prompt("  Select", "2")
-    accounts = active if mode != "1" else [active[0]]
-
-    console.print("\n  ─── Delay Between Messages ───────────────")
-    console.print("  [1] 60–120s  (Safest)  ⭐")
-    console.print("  [2] 30–60s")
-    console.print("  [3] 15–30s")
-    console.print("  [4] Custom")
-    dc = prompt("  Select", "1")
-    delays = {"1": (60, 120), "2": (30, 60), "3": (15, 30)}
-    if dc == "4":
-        dmin = int(prompt("  Min (seconds)", "30") or "30")
-        dmax = int(prompt("  Max (seconds)", "60") or "60")
-        delay = (dmin, dmax)
-    else:
-        delay = delays.get(dc, (60, 120))
-
-    console.print("\n  ─── Messages Per Account Per Day ─────────")
-    daily_limit = int(prompt("  Limit (recommended: 30)", "30") or "30")
-
-    switch_after = int(prompt("  Switch account after N messages", "10") or "10")
-
-    return {
-        "accounts":     accounts,
-        "delay":        delay,
-        "daily_limit":  daily_limit,
-        "switch_after": switch_after,
-    }
+def _spin(text: str) -> str:
+    import re
+    def replacer(m):
+        options = m.group(1).split("|")
+        return random.choice(options)
+    return re.sub(r"\{([^}]+)\}", replacer, text)
 
 
-async def _send_messages(targets: list[str], message: str, cfg: dict, source_label: str):
-    accounts    = cfg["accounts"]
-    delay       = cfg["delay"]
-    daily_limit = cfg["daily_limit"]
-    switch_after = cfg["switch_after"]
+# ─── 9. Read Rate ─────────────────────────────────────────────────────────────
 
-    acc_idx  = 0
-    acc_ops  = 0
-    sent_ok  = 0
-    skipped  = 0
-    failed   = 0
-
-    client = _build_client(accounts[acc_idx])
-    await client.connect()
-
-    log_path = LOGS_DIR / f"messaging_{date_str()}.log"
-
-    console.print(f"\n  🚀 Sending to [bold]{len(targets)}[/bold] users...\n")
-
-    for target in targets:
-        target = target.strip().strip("@")
-        if not target:
-            continue
-
-        current = accounts[acc_idx]
-
-        if current.get("today_messages", 0) >= daily_limit:
-            acc_idx = (acc_idx + 1) % len(accounts)
-            if acc_idx == 0:
-                print_warn("All accounts reached daily message limit.")
-                break
-            await client.disconnect()
-            client = _build_client(accounts[acc_idx])
-            await client.connect()
-            acc_ops = 0
-            current = accounts[acc_idx]
-
-        if acc_ops >= switch_after and len(accounts) > 1:
-            acc_idx = (acc_idx + 1) % len(accounts)
-            await client.disconnect()
-            client = _build_client(accounts[acc_idx])
-            await client.connect()
-            acc_ops = 0
-            current = accounts[acc_idx]
-            print_info(f"Rotated to {accounts[acc_idx]['phone']}")
-
-        if is_blacklisted(target):
-            console.print(f"  [dim]{target} — Blacklisted, skipped[/dim]")
-            skipped += 1
-            continue
-
-        try:
-            entity = await client.get_entity(target if target.startswith("+") else f"@{target}")
-            await client.send_message(entity, message)
-            console.print(f"  [dim]{now_str()[:19]}[/dim]  ✅ [green]{target}[/green]")
-            increment_account_counter(current["phone"], "messages")
-            increment_stat("message", "sent")
-            sent_ok  += 1
-            acc_ops  += 1
-
-            with open(log_path, "a") as lf:
-                lf.write(f"[{now_str()}] SENT → {target} via {current['phone']}\n")
-
-        except UserPrivacyRestrictedError:
-            console.print(f"  [dim]{target} — Privacy restricted[/dim]")
-            skipped += 1
-        except InputUserDeactivatedError:
-            console.print(f"  [dim]{target} — Deleted account[/dim]")
-            skipped += 1
-        except UserIsBlockedError:
-            console.print(f"  [dim]{target} — Has blocked you[/dim]")
-            skipped += 1
-        except PeerFloodError:
-            print_warn(f"PeerFlood on {current['phone']} — switching")
-            acc_idx = (acc_idx + 1) % len(accounts)
-            await client.disconnect()
-            client = _build_client(accounts[acc_idx])
-            await client.connect()
-            acc_ops = 0
-            failed += 1
-        except FloodWaitError as e:
-            print_warn(f"FloodWait {e.seconds}s on {current['phone']} — switching")
-            acc_idx = (acc_idx + 1) % len(accounts)
-            await client.disconnect()
-            wait_countdown(min(e.seconds, 60), "FloodWait pause")
-            client = _build_client(accounts[acc_idx])
-            await client.connect()
-            acc_ops = 0
-        except Exception as e:
-            console.print(f"  ❌ [red]{target} — {type(e).__name__}[/red]")
-            failed += 1
-
-        await asyncio.sleep(random.randint(*delay))
-
-    await client.disconnect()
-
-    console.print(f"\n  ─── Messaging Summary ───────────────────")
-    console.print(f"  ✅ Sent    : [green]{sent_ok}[/green]")
-    console.print(f"  ⚠️  Skipped : [yellow]{skipped}[/yellow]")
-    console.print(f"  ❌ Failed  : [red]{failed}[/red]")
-
-
-async def send_from_csv():
-    print_header("📋  Send Message to User List (CSV)")
-    files = list(EXPORTS_DIR.glob("*.csv"))
-    if not files:
-        print_error("No CSV files found. Run member scraper first.")
+def read_rate_menu():
+    print_header("📈  Read Rate Tracker")
+    print_info("Telegram doesn't expose read receipts for most accounts.")
+    console.print("  However, we can track [bold]reply rate[/bold] from recipients.\n")
+    log_path = Path("logs") / "messages.log"
+    if not log_path.exists():
+        print_info("No message log found yet.")
         input("\n  Press ENTER...")
         return
-
-    for i, f in enumerate(files, 1):
-        console.print(f"  [{i}] {f.name}")
-    sel = prompt("  Select file", "1")
-    try:
-        filepath = files[int(sel) - 1]
-    except Exception:
-        print_error("Invalid selection.")
-        input("\n  Press ENTER...")
-        return
-
-    targets = []
-    with open(filepath, encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            u = row.get("username") or row.get("user_id") or row.get("phone")
-            if u:
-                targets.append(str(u))
-
-    console.print(f"\n  [bold]{len(targets)}[/bold] recipients loaded.")
-
-    console.print("\n  ─── Compose Message ──────────────────────")
-    console.print("  [1] Single message")
-    console.print("  [2] Random from message list (anti-spam)")
-    msg_mode = prompt("  Select", "1")
-
-    if msg_mode == "1":
-        message = prompt("  Type your message")
-        if not message:
-            input("\n  Press ENTER...")
-            return
-        messages = [message]
-    else:
-        console.print("  Enter messages (type 'done' to finish):")
-        messages = []
-        i = 1
-        while True:
-            m = prompt(f"  Message {i}")
-            if m.lower() in ("done", ""):
-                break
-            messages.append(m)
-            i += 1
-
-    cfg = _configure_msg_settings()
-    if not cfg:
-        input("\n  Press ENTER...")
-        return
-
-    if confirm("\n  Start sending?"):
-        for i, target in enumerate(targets):
-            msg = random.choice(messages)
-            await _send_messages([target], msg, cfg, filepath.name)
-    input("\n  Press ENTER...")
-
-
-async def send_manual():
-    print_header("✍️  Send to Specific Users")
-    console.print("  Enter @usernames or phone numbers (type 'done' to finish):\n")
-    targets = []
-    i = 1
-    while True:
-        u = prompt(f"  {i}")
-        if u.lower() in ("done", ""):
-            break
-        targets.append(u)
-        i += 1
-
-    if not targets:
-        return
-
-    message = prompt("  Type your message")
-    if not message:
-        return
-
-    cfg = _configure_msg_settings()
-    if not cfg:
-        input("\n  Press ENTER...")
-        return
-
-    if confirm(f"\n  Send to {len(targets)} users?"):
-        await _send_messages(targets, message, cfg, "manual")
-    input("\n  Press ENTER...")
-
-
-async def send_to_group_members():
-    print_header("🔄  Send to Group Members")
-    group_link = prompt("🔗 Group link or @username")
-    if not group_link:
-        return
-
-    active = get_active_accounts()
-    if not active:
-        print_error("No active accounts.")
-        input("\n  Press ENTER...")
-        return
-
-    api_id, api_hash = config.get_api_credentials()
-    client = TelegramClient(str(config.SESSIONS_DIR / active[0]["phone"]), int(api_id), api_hash)
-    await client.connect()
-    targets = []
-    try:
-        entity = await client.get_entity(group_link.strip())
-        async for user in client.iter_participants(entity):
-            if user.username:
-                targets.append(user.username)
-        print_info(f"Loaded {len(targets)} members from group.")
-    except Exception as e:
-        print_error(f"Could not fetch group: {e}")
-        await client.disconnect()
-        input("\n  Press ENTER...")
-        return
-    await client.disconnect()
-
-    message = prompt("  Message to send")
-    if not message:
-        return
-
-    cfg = _configure_msg_settings()
-    if not cfg:
-        input("\n  Press ENTER...")
-        return
-
-    if confirm(f"\n  Send to {len(targets)} members?"):
-        await _send_messages(targets, message, cfg, group_link)
-    input("\n  Press ENTER...")
-
-
-async def scheduled_messaging():
-    print_header("🕐  Scheduled Messaging")
-    targets_input = prompt("  Targets (comma-separated @usernames)")
-    targets = [t.strip() for t in targets_input.split(",") if t.strip()]
-
-    message = prompt("  Message")
-    if not message or not targets:
-        return
-
-    delay_hours = float(prompt("  Send after how many hours?", "1") or "1")
-
-    console.print(f"\n  Will send to [bold]{len(targets)}[/bold] users after [bold]{delay_hours}h[/bold]")
-    if confirm("  Schedule?"):
-        wait_countdown(int(delay_hours * 3600), "Scheduled message")
-        cfg = _configure_msg_settings()
-        if cfg:
-            await _send_messages(targets, message, cfg, "scheduled")
-    input("\n  Press ENTER...")
-
-
-def view_messaging_logs():
-    print_header("📊  Messaging Logs")
-    logs = sorted(LOGS_DIR.glob("messaging_*.log"), reverse=True)
-    if not logs:
-        print_info("No messaging logs yet.")
-        input("\n  Press ENTER...")
-        return
-    for i, f in enumerate(logs[:10], 1):
-        console.print(f"  [{i}] {f.name}")
-    sel = prompt("  Select #", "1")
-    try:
-        log = logs[int(sel) - 1]
-        lines = log.read_text(encoding="utf-8").strip().split("\n")
-        display = lines[-40:] if len(lines) > 40 else lines
-        console.print()
-        for line in display:
-            console.print(f"  [dim]{line}[/dim]")
-    except Exception:
-        print_error("Invalid selection.")
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    success = sum(1 for l in lines if "SUCCESS" in l)
+    failed  = sum(1 for l in lines if "FAILED"  in l)
+    total   = success + failed
+    rate    = f"{success/total*100:.1f}%" if total else "0%"
+    console.print(f"  Total Sent   : [bold]{total}[/bold]")
+    console.print(f"  Delivered    : [green]{success}[/green]")
+    console.print(f"  Failed       : [red]{failed}[/red]")
+    console.print(f"  Delivery Rate: [bold cyan]{rate}[/bold cyan]")
     input("\n  Press ENTER...")
