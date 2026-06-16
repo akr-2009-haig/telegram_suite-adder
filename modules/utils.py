@@ -15,10 +15,12 @@ from rich.align import Align
 
 console = Console()
 
-BANNER = """
+BANNER = r"""
 ╔══════════════════════════════════════════════════════════════╗
 ║          Telegram Automation Suite  v1.0                     ║
 ║                  Termux Edition — CLI                        ║
+╠══════════════════════════════════════════════════════════════╣
+║          By: Akram Haig  |  +967772009303                   ║
 ╚══════════════════════════════════════════════════════════════╝"""
 
 COLORS = {
@@ -87,7 +89,7 @@ def prompt_secret(label: str) -> str:
         return ""
 
 
-def menu_choice(options: list[tuple[str, str]], back: bool = True) -> str:
+def menu_choice(options: list, back: bool = True) -> str:
     console.print()
     for key, label in options:
         console.print(f"  [bold cyan][{key}][/bold cyan] {label}")
@@ -178,5 +180,5 @@ def write_json(path: Path, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def paginate(items: list, page_size: int = 10) -> list[list]:
+def paginate(items: list, page_size: int = 10) -> list:
     return [items[i:i+page_size] for i in range(0, len(items), page_size)]
