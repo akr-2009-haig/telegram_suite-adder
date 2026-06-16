@@ -35,10 +35,16 @@ def save_api_credentials(api_id: str, api_hash: str) -> None:
 
 
 def load_settings() -> dict:
+    base = DEFAULT_SETTINGS.copy() if "DEFAULT_SETTINGS" in dir() else {}
     if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    return default_settings()
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                loaded = json.load(f)
+                base.update(loaded)
+                return base
+        except Exception:
+            pass
+    return base if base else default_settings()
 
 
 def save_settings(settings: dict) -> None:
@@ -46,21 +52,36 @@ def save_settings(settings: dict) -> None:
         json.dump(settings, f, indent=2)
 
 
+DEFAULT_SETTINGS: dict = {
+    "add_limit":             20,
+    "scrape_limit":          500,
+    "msg_limit":             30,
+    "delay_min":             60,
+    "delay_max":             120,
+    "sessions_dir":          str(SESSIONS_DIR),
+    "exports_dir":           str(EXPORTS_DIR),
+    "logs_dir":              str(LOGS_DIR),
+    "language":              "English",
+    "notifications_enabled": True,
+    "verbose_log":           True,
+    "rotation_mode":         "smart",
+    "switch_trigger":        "ops",
+    "switch_after_ops":      5,
+    "switch_after_minutes":  10,
+    "smart_limit_level":     "balanced",
+    "night_mode":            False,
+    "auto_backup_freq":      "disabled",
+    "auto_backup_upload":    False,
+    "log_cleanup":           "weekly",
+    "proxy_auto_rotate":     False,
+    "proxy_rotate_on_fail":  True,
+    "proxy_notify_fail":     True,
+    "active_start_hour":     8,
+    "active_end_hour":       23,
+    "rest_min_minutes":      5,
+    "rest_max_minutes":      15,
+}
+
+
 def default_settings() -> dict:
-    return {
-        "daily_import_limit": 20,
-        "daily_collection_limit": 500,
-        "daily_message_limit": 30,
-        "delay_min": 60,
-        "delay_max": 120,
-        "sessions_dir": str(SESSIONS_DIR),
-        "exports_dir": str(EXPORTS_DIR),
-        "logs_dir": str(LOGS_DIR),
-        "language": "English",
-        "notifications": True,
-        "detailed_logging": True,
-        "rotation_mode": "smart",
-        "switch_after_ops": 5,
-        "switch_after_minutes": 10,
-        "security_level": "balanced",
-    }
+    return DEFAULT_SETTINGS.copy()
