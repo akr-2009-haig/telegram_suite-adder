@@ -9,19 +9,14 @@ def settings_menu():
     while True:
         print_header("⚙️  Settings", "System Configuration")
         cfg = config.load_settings()
-        api_id   = cfg.get("api_id","Not set")
-        api_hash = cfg.get("api_hash","Not set")
         night    = "[green]ON[/green]" if cfg.get("night_mode") else "[dim]OFF[/dim]"
         notif    = "[green]ON[/green]" if cfg.get("notif_bot_token") else "[dim]OFF[/dim]"
         passwd   = "[green]SET[/green]" if cfg.get("tool_password") else "[dim]NOT SET[/dim]"
         autoback = cfg.get("auto_backup_freq","disabled")
 
-        console.print(f"  API ID:        [cyan]{api_id}[/cyan]")
-        console.print(f"  API Hash:      [cyan]{str(api_hash)[:8]}...[/cyan]" if api_hash != "Not set" else f"  API Hash:      [dim]Not set[/dim]")
         console.print()
 
         choice = menu_choice([
-            ("1",  f"🔑  API ID / API Hash"),
             ("2",  f"📤  Daily Add Limit per Account       [{cfg.get('add_limit',20)}]"),
             ("3",  f"📥  Daily Scrape Limit per Account    [{cfg.get('scrape_limit',500)}]"),
             ("4",  f"💬  Daily Messages Limit per Account  [{cfg.get('msg_limit',30)}]"),
@@ -37,8 +32,7 @@ def settings_menu():
             ("14", "🔄  Reset to Defaults"),
         ])
 
-        if choice == "1":   set_api_keys()
-        elif choice == "2": set_limit("add_limit",     "Daily Add Limit",     "20")
+        if choice == "2": set_limit("add_limit",     "Daily Add Limit",     "20")
         elif choice == "3": set_limit("scrape_limit",  "Daily Scrape Limit",  "500")
         elif choice == "4": set_limit("msg_limit",     "Daily Msg Limit",     "30")
         elif choice == "5": set_delay()
@@ -54,17 +48,6 @@ def settings_menu():
         elif choice == "0": break
 
 
-def set_api_keys():
-    print_header("🔑  API Credentials")
-    cfg  = config.load_settings()
-    console.print("  Get your credentials from https://my.telegram.org\n")
-    api_id   = prompt("  API ID",   cfg.get("api_id",""))
-    api_hash = prompt("  API Hash", cfg.get("api_hash",""))
-    if api_id:   cfg["api_id"]   = api_id
-    if api_hash: cfg["api_hash"] = api_hash
-    config.save_settings(cfg)
-    print_success("API credentials saved.")
-    input("\n  Press ENTER...")
 
 
 def set_limit(key: str, label: str, default: str):
@@ -195,11 +178,6 @@ def reset_defaults():
     if not confirm("  Are you sure?"):
         return
     cfg = config.load_settings()
-    api_id   = cfg.get("api_id")
-    api_hash = cfg.get("api_hash")
-    defaults = config.DEFAULT_SETTINGS.copy()
-    if api_id:   defaults["api_id"]   = api_id
-    if api_hash: defaults["api_hash"] = api_hash
     config.save_settings(defaults)
     print_success("Settings reset to defaults.")
     input("\n  Press ENTER...")
