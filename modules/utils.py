@@ -70,7 +70,14 @@ def print_info(msg: str):
     console.print(f"  [bold cyan]ℹ  {msg}[/bold cyan]")
 
 
-def prompt(label: str, default: str = "") -> str:
+def prompt(label: str, default: str = "", password: bool = False) -> str:
+    if password:
+        import getpass
+        try:
+            val = getpass.getpass(f"  {label}: ")
+            return val.strip() if val else default
+        except (KeyboardInterrupt, EOFError):
+            return ""
     placeholder = f" [{default}]" if default else ""
     try:
         val = console.input(f"  [bold white]{label}{placeholder}:[/bold white] ").strip()
@@ -99,8 +106,9 @@ def menu_choice(options: list, back: bool = True) -> str:
     return prompt("Select").strip()
 
 
-def confirm(question: str) -> bool:
-    ans = prompt(f"{question} [Y/N]").upper()
+def confirm(question: str, default: bool = False) -> bool:
+    hint = "[Y/n]" if default else "[y/N]"
+    ans = prompt(f"{question} {hint}", "y" if default else "n").upper()
     return ans in ("Y", "YES", "1")
 
 
