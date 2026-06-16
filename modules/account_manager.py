@@ -6,7 +6,8 @@ from telethon import TelegramClient
 from telethon.errors import (
     SessionPasswordNeededError, PhoneCodeInvalidError,
     PhoneNumberInvalidError, FloodWaitError, PasswordHashInvalidError,
-    PhoneCodeExpiredError,
+    PhoneCodeExpiredError, PhoneNumberBannedError, AuthRestartError,
+    RPCError,
 )
 from rich.table import Table
 from rich import box
@@ -76,21 +77,57 @@ async def add_new_account():
         input("\n  Press ENTER to continue...")
         return
 
+    # Phone number input
     phone = prompt("📱 Phone Number (e.g. +966501234567)")
     if not phone:
         return
+    phone = phone.strip()
     if not phone.startswith("+"):
         print_error("Phone must include country code (e.g. +966...)")
         input("\n  Press ENTER to continue...")
         return
 
+    # Remove old partial session if exists
     session_path = str(SESSIONS_DIR / phone)
+    session_file = Path(session_path + ".session")
+
     client = TelegramClient(session_path, int(api_id), api_hash)
 
     try:
+        print_info("Connecting to Telegram...")
         await client.connect()
+
+        # Check if already authorized
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            print_warn(f"This account is already logged in as: {me.first_name} (@{me.username})")
+            if not confirm("  Re-authenticate this account?"):
+                await client.disconnect()
+                input("\n  Press ENTER to continue...")
+                return
+            await client.log_out()
+            await client.disconnect()
+            # Remove old session
+            if session_file.exists():
+                session_file.unlink()
+            client = TelegramClient(session_path, int(api_id), api_hash)
+            await client.connect()
+
+        # Send verification code
         console.print(f"\n  [dim]Sending verification code to [bold]{phone}[/bold]...[/dim]")
-        result = await client.send_code_request(phone)
+        try:
+            result = await client.send_code_request(phone)
+        except PhoneNumberBannedError:
+            print_error("This phone number is banned from Telegram.")
+            await client.disconnect()
+            input("\n  Press ENTER to continue...")
+            return
+        except FloodWaitError as e:
+            print_warn(f"Too many requests. Please wait {e.seconds} seconds before retrying.")
+            await client.disconnect()
+            input("\n  Press ENTER to continue...")
+            return
+
         phone_code_hash = result.phone_code_hash
 
         console.print(f"\n  ✅ Code sent to [bold]{phone}[/bold]")
@@ -100,53 +137,94 @@ async def add_new_account():
         console.print("  [cyan][2][/cyan] SMS Message")
         console.print()
 
-        code = prompt("🔢 Enter Verification Code")
+        # Get verification code
+        code = prompt("🔢 Enter Verification Code (digits only)")
         if not code:
+            print_error("No code entered. Cancelled.")
             await client.disconnect()
             return
+        code = code.strip().replace(" ", "")
 
+        # Sign in
         try:
             await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
 
         except SessionPasswordNeededError:
-            console.print("\n  [yellow]🔐 Two-Factor Authentication required[/yellow]")
+            # Two-Factor Authentication required
+            console.print()
+            console.print("  ┌──────────────────────────────────────────────┐")
+            console.print("  │  🔐  Two-Factor Authentication Required      │")
+            console.print("  └──────────────────────────────────────────────┘")
+            console.print()
             password = prompt_secret("🔑 Enter 2FA Password")
+            if not password:
+                print_error("No password entered. Cancelled.")
+                await client.disconnect()
+                input("\n  Press ENTER to continue...")
+                return
             try:
                 await client.sign_in(password=password)
             except PasswordHashInvalidError:
-                print_error("Incorrect 2FA password.")
+                print_error("Incorrect 2FA password. Please try again.")
                 await client.disconnect()
+                if session_file.exists():
+                    session_file.unlink()
                 input("\n  Press ENTER to continue...")
                 return
 
         except PhoneCodeInvalidError:
-            print_error("Invalid verification code.")
+            print_error("Invalid verification code. Please check and try again.")
             await client.disconnect()
+            if session_file.exists():
+                session_file.unlink()
             input("\n  Press ENTER to continue...")
             return
 
         except PhoneCodeExpiredError:
-            print_error("Code expired. Please try again.")
+            print_error("Verification code has expired. Please start over.")
+            await client.disconnect()
+            if session_file.exists():
+                session_file.unlink()
+            input("\n  Press ENTER to continue...")
+            return
+
+        except AuthRestartError:
+            print_warn("Telegram requested auth restart. Retrying...")
+            await client.disconnect()
+            if session_file.exists():
+                session_file.unlink()
+            input("\n  Press ENTER to try again...")
+            return
+
+        # Get account info
+        me = await client.get_me()
+        if not me:
+            print_error("Could not retrieve account info. Please try again.")
             await client.disconnect()
             input("\n  Press ENTER to continue...")
             return
 
-        me = await client.get_me()
+        # Display success
         console.print()
-        console.print("  ┌──────────────────────────────────────────┐")
-        console.print("  │  🎉  Login Successful                    │")
-        console.print("  ├──────────────────────────────────────────┤")
-        console.print(f"  │  Name     : [bold]{me.first_name or ''} {me.last_name or ''}[/bold]")
-        console.print(f"  │  Username : [bold]@{me.username or 'N/A'}[/bold]")
+        console.print("  ┌──────────────────────────────────────────────┐")
+        console.print("  │  🎉  Login Successful!                        │")
+        console.print("  ├──────────────────────────────────────────────┤")
+        fname = (me.first_name or "")
+        lname = (me.last_name or "")
+        full_name = f"{fname} {lname}".strip() or "N/A"
+        uname = me.username or "N/A"
+        console.print(f"  │  Name     : [bold]{full_name}[/bold]")
+        console.print(f"  │  Username : [bold]@{uname}[/bold]")
         console.print(f"  │  Phone    : [bold]{phone}[/bold]")
         console.print(f"  │  User ID  : [dim]{me.id}[/dim]")
         console.print(f"  │  Session  : [dim]sessions/{phone}.session[/dim]")
-        console.print("  └──────────────────────────────────────────┘")
+        console.print("  └──────────────────────────────────────────────┘")
         console.print()
 
+        # Save account to database
         account_data = {
             "phone": phone,
-            "name": f"{me.first_name or ''} {me.last_name or ''}".strip(),
+            "name": full_name,
             "username": me.username or "",
             "user_id": me.id,
             "status": "active",
@@ -159,32 +237,60 @@ async def add_new_account():
             "warmup_done": False,
         }
 
+        # Assign proxy optionally
         assign = prompt("🌐 Assign a proxy to this account? [Y/N]", "N").upper()
         if assign == "Y":
             from modules.proxy_manager import assign_proxy_to_account
+            await client.disconnect()
             assign_proxy_to_account(phone)
+            client = None
 
         add_account(account_data)
         print_success(f"Account {phone} saved successfully.")
 
-        another = prompt("\n  Add another account? [Y/N]", "N").upper()
-        if another == "Y":
+        if client:
             await client.disconnect()
+
+        # Ask to add another
+        console.print()
+        another = prompt("  Add another account? [Y/N]", "N").upper()
+        if another == "Y":
             await add_new_account()
+        else:
+            input("\n  Press ENTER to continue...")
 
     except PhoneNumberInvalidError:
-        print_error("Invalid phone number format.")
+        print_error("Invalid phone number format. Use international format: +966XXXXXXXXX")
+        await _safe_disconnect(client)
+        if session_file.exists():
+            session_file.unlink()
+        input("\n  Press ENTER to continue...")
     except FloodWaitError as e:
-        print_warn(f"FloodWait: Please wait {e.seconds} seconds before retrying.")
+        print_warn(f"Flood protection — wait {e.seconds} seconds before retrying.")
+        await _safe_disconnect(client)
+        input("\n  Press ENTER to continue...")
+    except RPCError as e:
+        print_error(f"Telegram error: {e.message}")
+        await _safe_disconnect(client)
+        if session_file.exists():
+            session_file.unlink()
+        input("\n  Press ENTER to continue...")
+    except ConnectionError as e:
+        print_error(f"Connection failed: {e}\nCheck your internet connection.")
+        await _safe_disconnect(client)
+        input("\n  Press ENTER to continue...")
     except Exception as e:
-        print_error(f"Unexpected error: {e}")
-    finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        print_error(f"Unexpected error: {type(e).__name__}: {e}")
+        await _safe_disconnect(client)
+        input("\n  Press ENTER to continue...")
 
-    input("\n  Press ENTER to continue...")
+
+async def _safe_disconnect(client):
+    try:
+        if client and client.is_connected():
+            await client.disconnect()
+    except Exception:
+        pass
 
 
 # ─── Import Sessions ─────────────────────────────────────────────────────────
@@ -249,7 +355,6 @@ def import_sessions():
                     "warmup_done": False,
                 })
                 imported += 1
-
             print_success(f"Imported {imported} sessions successfully.")
         input("\n  Press ENTER...")
 
@@ -281,6 +386,9 @@ def import_sessions():
         })
         print_success(f"Session {phone} imported.")
         input("\n  Press ENTER...")
+
+    elif choice == "0":
+        return
 
 
 # ─── View Accounts ───────────────────────────────────────────────────────────
@@ -360,32 +468,40 @@ async def validate_accounts():
         return
 
     results = []
-    with progress_bar(len(accounts), "Validating") as prog:
-        task = prog.add_task("Validating", total=len(accounts))
-        for acc in accounts:
-            phone = acc["phone"]
-            session = str(SESSIONS_DIR / phone)
-            try:
-                client = TelegramClient(session, int(api_id), api_hash)
-                await client.connect()
-                if await client.is_user_authorized():
-                    me = await client.get_me()
-                    update_account(phone, {"status": "active", "name": f"{me.first_name or ''} {me.last_name or ''}".strip()})
-                    results.append((phone, "active"))
-                else:
-                    update_account(phone, {"status": "banned"})
-                    results.append((phone, "banned"))
-                await client.disconnect()
-            except Exception as e:
-                update_account(phone, {"status": "error"})
-                results.append((phone, "error"))
-            prog.advance(task)
+    console.print(f"  Checking [bold]{len(accounts)}[/bold] accounts...\n")
+
+    for i, acc in enumerate(accounts, 1):
+        phone = acc["phone"]
+        session = str(SESSIONS_DIR / phone)
+        console.print(f"  [{i}/{len(accounts)}] {phone} ... ", end="")
+        try:
+            client = TelegramClient(session, int(api_id), api_hash)
+            await client.connect()
+            if await client.is_user_authorized():
+                me = await client.get_me()
+                name = f"{me.first_name or ''} {me.last_name or ''}".strip()
+                update_account(phone, {"status": "active", "name": name})
+                results.append((phone, "active"))
+                console.print("[bold green]✅ Active[/bold green]")
+            else:
+                update_account(phone, {"status": "banned"})
+                results.append((phone, "banned"))
+                console.print("[bold red]⛔ Not Authorized[/bold red]")
+            await client.disconnect()
+        except Exception as e:
+            update_account(phone, {"status": "error"})
+            results.append((phone, "error"))
+            console.print(f"[bold yellow]❌ Error: {type(e).__name__}[/bold yellow]")
+
+    active_c  = sum(1 for _, s in results if s == "active")
+    banned_c  = sum(1 for _, s in results if s == "banned")
+    error_c   = sum(1 for _, s in results if s == "error")
 
     console.print()
-    for phone, status in results:
-        icon = "✅" if status == "active" else ("⛔" if status == "banned" else "❌")
-        color = "green" if status == "active" else ("red" if status == "banned" else "yellow")
-        console.print(f"  {icon} [{color}]{phone}[/{color}]  →  {status.upper()}")
+    console.print(f"  ─── Summary ───────────────────────────────")
+    console.print(f"  ✅ Active   : [green]{active_c}[/green]")
+    console.print(f"  ⛔ Banned   : [red]{banned_c}[/red]")
+    console.print(f"  ❌ Errors   : [yellow]{error_c}[/yellow]")
 
     input("\n  Press ENTER to continue...")
 
@@ -395,6 +511,10 @@ async def validate_accounts():
 def remove_account_menu():
     print_header("❌  Remove Account")
     accounts = load_accounts()
+    if not accounts:
+        print_info("No accounts to remove.")
+        input("\n  Press ENTER...")
+        return
     for i, a in enumerate(accounts, 1):
         console.print(f"  [{i}] {a['phone']}  ({a.get('name','N/A')})")
     console.print()
@@ -426,7 +546,7 @@ def auto_remove_banned():
     print_header("🗑️  Auto Remove Banned Accounts")
     accounts = load_accounts()
     banned = [a for a in accounts if a.get("status") in ("banned", "error")]
-    console.print(f"  Found [red]{len(banned)}[/red] banned/restricted accounts.")
+    console.print(f"  Found [red]{len(banned)}[/red] banned/error accounts.")
     if not banned:
         print_info("No banned accounts found.")
         input("\n  Press ENTER...")
@@ -437,6 +557,9 @@ def auto_remove_banned():
     if confirm(f"  Remove all {len(banned)} banned accounts?"):
         for b in banned:
             remove_account(b["phone"])
+            sf = SESSIONS_DIR / f"{b['phone']}.session"
+            if sf.exists():
+                sf.unlink()
         print_success(f"Removed {len(banned)} accounts.")
     input("\n  Press ENTER...")
 
@@ -473,7 +596,7 @@ async def account_warmup():
     console.print()
 
     console.print("  Duration:")
-    console.print("  [1] Light   — 1 Day")
+    console.print("  [1] Light    — 1 Day")
     console.print("  [2] Moderate — 3 Days")
     console.print("  [3] Intensive — 7 Days  ⭐ Recommended")
     console.print()
@@ -484,6 +607,12 @@ async def account_warmup():
     accounts = load_accounts()
     active = [a for a in accounts if a.get("status") == "active"]
     console.print(f"\n  Active Accounts Available: [green]{len(active)}[/green]")
+
+    if not active:
+        print_error("No active accounts found.")
+        input("\n  Press ENTER...")
+        return
+
     scope = prompt("  [A] All Accounts  /  [M] Manual Selection", "A").upper()
 
     if scope == "M":
