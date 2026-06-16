@@ -15,8 +15,14 @@ import struct
 import time
 from pathlib import Path
 
-# ─── كلمة المرور مدمجة في الكود ─────────────────────────────────────────────
-_P = "05450545"
+# ─── هاش كلمة المرور (PBKDF2-SHA256، لا يمكن عكسه) ────────────────────────────
+# لا تُخزَّن كلمة المرور هنا — فقط بصمتها المشفرة
+_PH = (
+    b"\x82\x16\xb1\x9d\xbf\x92\x9e\x22"
+    b"\x54\x95\xb0\x24\xa0\xa2\x54\x81"
+    b"\x08\x32\x78\x05\x3f\x44\xbc\x33"
+  منسوخة44\xdb\x7c\x81\xbc\xc6\x94\x3f"
+)
 
 # ─── موقع الملف المخفي ────────────────────────────────────────────────────────
 _HIDDEN_DIR  = Path.home() / ".cache" / ".libsys" / ".runtime"
@@ -46,6 +52,29 @@ def _derive_key() -> bytes:
 def _get_fernet():
     from cryptography.fernet import Fernet
     return Fernet(_derive_key())
+
+
+# ─── التحقق من كلمة المرور بمقارنة الهاش (لا يُكشف النص الأصلي أبداً) ─────────
+
+def _verify_password(pw: str) -> bool:
+    """
+    تحسب هاش PBKDF2 لكلمة المرور المُدخَلة وتقارنها بـ _PH.
+    حتى لو قرأ أحد الكود كاملاً لا يمكنه معرفة كلمة المرور الأصلية.
+    """
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+    import cryptography.hazmat.backends as backends
+
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=_SEED,
+        iterations=390000,
+        backend=backends.default_backend(),
+    )
+    candidate = kdf.derive(pw.encode("utf-8"))
+    # مقارنة ثابتة الوقت لمنع هجمات التوقيت
+    return hashlib.compare_digest(candidate, _PH)
 
 
 # ─── مولد البصمة ──────────────────────────────────────────────────────────────
@@ -201,19 +230,30 @@ def _activation_screen() -> None:
     print("  ╚══════════════════════════════════════════════════╝")
     print("")
 
-    try:
-        pw = getpass.getpass("  أدخل كلمة المرور: ")
-    except (KeyboardInterrupt, EOFError):
-        print("")
-        sys.exit(0)
+    attempts = 0
+    while attempts < 3:
+        try:
+            pw = getpass.getpass("  أدخل كلمة المرور: ")
+        except (KeyboardInterrupt, EOFError):
+            print("")
+            sys.exit(0)
 
-    if pw.strip() != _P:
+        if _verify_password(pw.strip()):
+            break
+
+        attempts += 1
+        remaining = 3 - attempts
         os.system("clear")
         print("")
-        print("  ❌  كلمة المرور خاطئة.")
-        print("")
-        time.sleep(2)
-        sys.exit(1)
+        if remaining > 0:
+            print(f"  ❌  كلمة المرور خاطئة. ({remaining} محاولة متبقية)")
+            print("")
+            time.sleep(1)
+        else:
+            print("  ❌  كلمة المرور خاطئة. تم إغلاق الأداة.")
+            print("")
+            time.sleep(2)
+            sys.exit(1)
 
     print("")
     print("  ⏳  جاري ربط الأداة بهذا الجهاز...")
@@ -252,14 +292,12 @@ def check_device_lock() -> None:
         sys.exit(1)
 
     if not _HIDDEN_FILE.exists():
-        # أول تشغيل — فعّل الأداة
         _activation_screen()
         return
 
     saved_fp = _load_fingerprint()
 
     if saved_fp is None:
-        # الملف موجود لكن تالف
         _show_corrupt()
         return
 
