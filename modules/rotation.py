@@ -1,114 +1,102 @@
-import random
-from rich.table import Table
-from rich import box
-
 from modules.utils import (
-    console, print_header, print_success, print_info, print_warn,
-    prompt, menu_choice, confirm, now_str, status_icon,
+    console, print_header, print_success, print_error, print_info, print_warn,
+    prompt, menu_choice, confirm, now_str,
 )
-from modules.database import (
-    load_accounts, save_accounts, reset_daily_counters, get_active_accounts,
-)
+from modules.database import load_accounts, save_accounts, get_active_accounts, increment_stat
 import config
-
-ROTATION_CFG_FILE = config.DATA_DIR / "rotation_cfg.json"
 
 
 def rotation_menu():
     while True:
-        print_header("🔄  Account Rotation System", "Distribute workload across accounts")
+        accounts = get_active_accounts()
+        print_header("🔄  Rotation System", f"Active accounts: {len(accounts)}")
+
         choice = menu_choice([
-            ("1", "⚙️  General Rotation Settings"),
+            ("1", "⚙️  Rotation Settings"),
             ("2", "📋  View Current Rotation Schedule"),
-            ("3", "✏️  Edit Account Order"),
-            ("4", "📊  View Account Limits & Daily Usage"),
+            ("3", "✏️  Edit Account Order / Priority"),
+            ("4", "📊  Account Usage & Daily Limits"),
             ("5", "🔄  Reset Daily Counters"),
+            ("6", "📈  Rotation Performance Stats"),
+            ("7", "🧪  Test Rotation (Dry Run)"),
+            ("8", "🕐  Time-Based Rotation Schedule"),
         ])
-        if choice == "1":
-            rotation_settings()
-        elif choice == "2":
-            view_schedule()
-        elif choice == "3":
-            edit_order()
-        elif choice == "4":
-            view_usage()
-        elif choice == "5":
-            _reset_counters()
-        elif choice == "0":
-            break
+
+        if choice == "1":   rotation_settings()
+        elif choice == "2": view_rotation_schedule()
+        elif choice == "3": edit_account_order()
+        elif choice == "4": account_usage_panel()
+        elif choice == "5": reset_daily_counters_menu()
+        elif choice == "6": rotation_performance_stats()
+        elif choice == "7": dry_run_test()
+        elif choice == "8": time_schedule_settings()
+        elif choice == "0": break
 
 
-def _load_cfg() -> dict:
-    from modules.utils import read_json
-    return read_json(ROTATION_CFG_FILE, _default_cfg())
-
-
-def _save_cfg(cfg: dict):
-    from modules.utils import write_json
-    write_json(ROTATION_CFG_FILE, cfg)
-
-
-def _default_cfg() -> dict:
-    return {
-        "mode":               "smart",
-        "switch_after_ops":   5,
-        "switch_after_mins":  10,
-        "on_restrict":        "switch_retry",
-        "on_all_limit":       "stop_resume",
-    }
-
-
-# ─── Rotation Settings ───────────────────────────────────────────────────────
+# ─── 1. Rotation Settings ─────────────────────────────────────────────────────
 
 def rotation_settings():
-    print_header("⚙️  Rotation Configuration")
-    cfg = _load_cfg()
+    print_header("⚙️  Rotation Settings")
+    cfg = config.load_settings()
 
-    console.print("  1️⃣  Rotation Mode")
-    console.print("  [1] 🔁 Sequential")
-    console.print("  [2] 🎲 Random")
-    console.print("  [3] ⚖️  Weighted (Least-Used First)")
-    console.print("  [4] 🧠 Smart  ⭐  (Status + Age + Activity)")
-    mode_map = {"1": "sequential", "2": "random", "3": "weighted", "4": "smart"}
-    m = prompt(f"\n  Select Mode (current: {cfg['mode']})", "4")
-    cfg["mode"] = mode_map.get(m, "smart")
+    console.print("  ─── Switch Mode ────────────────────────────────────")
+    console.print("  [1] Sequential   — 1 → 2 → 3 → 4 → ... → 1")
+    console.print("  [2] Random       — random order each time")
+    console.print("  [3] Load-Based   — least-used account first")
+    console.print("  [4] Smart ⭐     — age + activity + status aware")
+    console.print("  [5] By Category  — each task uses its tagged accounts")
+    mode_map = {"1":"sequential","2":"random","3":"load","4":"smart","5":"category"}
+    cur_mode = cfg.get("rotation_mode","smart")
+    cur_idx  = {v:k for k,v in mode_map.items()}.get(cur_mode,"4")
+    console.print(f"\n  Current: [cyan]{cur_mode}[/cyan]")
+    choice = prompt("  Select mode", cur_idx)
+    cfg["rotation_mode"] = mode_map.get(choice, cur_mode)
 
-    console.print("\n  2️⃣  Switch Condition")
-    console.print("  [1] After N Operations")
-    console.print("  [2] After N Minutes")
-    console.print("  [3] After First Error")
-    console.print("  [4] Mixed (Operations + Time, whichever first)")
-    sc = prompt("  Select", "4")
-    if sc == "1":
-        cfg["switch_after_ops"] = int(prompt("  Operations before switch", str(cfg["switch_after_ops"])) or cfg["switch_after_ops"])
-    elif sc == "2":
-        cfg["switch_after_mins"] = int(prompt("  Minutes before switch", str(cfg["switch_after_mins"])) or cfg["switch_after_mins"])
-    elif sc == "4":
-        cfg["switch_after_ops"] = int(prompt("  Max operations", str(cfg["switch_after_ops"])) or cfg["switch_after_ops"])
-        cfg["switch_after_mins"] = int(prompt("  Max minutes", str(cfg["switch_after_mins"])) or cfg["switch_after_mins"])
+    console.print("\n  ─── Switch Trigger ─────────────────────────────────")
+    console.print("  [1] After N operations     [2] After N minutes")
+    console.print("  [3] On first error/warning [4] Mixed (ops + time)")
+    console.print("  [5] Auto — based on account health")
+    trigger_map = {"1":"ops","2":"time","3":"error","4":"mixed","5":"auto"}
+    cur_trig = cfg.get("switch_trigger","ops")
+    t_idx    = {v:k for k,v in trigger_map.items()}.get(cur_trig,"1")
+    tc = prompt("  Select trigger", t_idx)
+    cfg["switch_trigger"] = trigger_map.get(tc, cur_trig)
 
-    console.print("\n  3️⃣  On Account Restriction")
-    console.print("  [1] Immediate Switch + Remove from Rotation")
-    console.print("  [2] Switch + Retry After 1 Hour")
-    console.print("  [3] Stop All + Notify")
-    rc = prompt("  Select", "2")
-    cfg["on_restrict"] = {"1": "switch_remove", "2": "switch_retry", "3": "stop_notify"}.get(rc, "switch_retry")
+    if cfg["switch_trigger"] in ("ops","mixed"):
+        n = prompt("  Switch after how many ops?", str(cfg.get("switch_after_ops",5)))
+        if n.isdigit():
+            cfg["switch_after_ops"] = int(n)
+    if cfg["switch_trigger"] in ("time","mixed"):
+        m = prompt("  Switch after how many minutes?", str(cfg.get("switch_after_minutes",10)))
+        if m.isdigit():
+            cfg["switch_after_minutes"] = int(m)
 
-    console.print("\n  4️⃣  When All Accounts Hit Limit")
-    console.print("  [1] Stop + Resume Next Day  ⭐")
-    console.print("  [2] Stop + Notify Only")
-    console.print("  [3] Wait for Next Available Account")
-    al = prompt("  Select", "1")
-    cfg["on_all_limit"] = {"1": "stop_resume", "2": "stop_notify", "3": "wait"}.get(al, "stop_resume")
+    console.print("\n  ─── When Account Gets Restricted ────────────────────")
+    console.print("  [1] Switch immediately + remove from rotation")
+    console.print("  [2] Switch + retry after 1 hour")
+    console.print("  [3] Stop all + send alert")
+    console.print("  [4] Switch + quarantine account")
+    ban_map = {"1":"remove","2":"retry","3":"stop","4":"quarantine"}
+    bc = prompt("  Select", "2")
+    cfg["on_restriction"] = ban_map.get(bc,"retry")
 
-    _save_cfg(cfg)
+    console.print("\n  ─── When All Accounts Hit Limits ────────────────────")
+    console.print("  [1] Stop + resume tomorrow automatically")
+    console.print("  [2] Stop + notify only")
+    console.print("  [3] Wait until one frees up")
+    console.print("  [4] Stop + send detailed report")
+    limit_map = {"1":"auto_resume","2":"notify","3":"wait","4":"report"}
+    lc = prompt("  Select","1")
+    cfg["on_all_limited"] = limit_map.get(lc,"auto_resume")
+
+    config.save_settings(cfg)
     print_success("Rotation settings saved.")
     input("\n  Press ENTER...")
 
 
-# ─── View Schedule ───────────────────────────────────────────────────────────
+# ─── 2. View Schedule ─────────────────────────────────────────────────────────
 
-def view_schedule():
+def view_rotation_schedule():
     print_header("📋  Current Rotation Schedule")
     accounts = get_active_accounts()
     if not accounts:
@@ -116,137 +104,275 @@ def view_schedule():
         input("\n  Press ENTER...")
         return
 
-    cfg = _load_cfg()
-    mode = cfg["mode"]
-    console.print(f"  Rotation Mode: [bold cyan]{mode.upper()}[/bold cyan]")
+    cfg   = config.load_settings()
+    mode  = cfg.get("rotation_mode","smart")
+    trig  = cfg.get("switch_trigger","ops")
+    after = cfg.get("switch_after_ops",5)
+
+    console.print(f"  Mode    : [bold cyan]{mode}[/bold cyan]")
+    console.print(f"  Trigger : [bold]{trig}[/bold] (every {after} ops)")
     console.print()
 
-    if mode == "sequential":
-        order = accounts
-    elif mode == "random":
-        order = accounts[:]
-        random.shuffle(order)
-    elif mode == "weighted":
-        order = sorted(accounts, key=lambda a: a.get("today_imports", 0))
-    else:
-        order = sorted(accounts, key=lambda a: (
-            0 if a.get("status") == "active" else 1,
-            a.get("today_imports", 0),
-        ))
-
-    for i, a in enumerate(order, 1):
-        status = "◀ Next" if i == 1 else ""
-        console.print(f"  [{i}] {a['phone']}  ({a.get('name','N/A')})  [dim]{status}[/dim]")
-
+    console.print(f"  {'#':<4} {'Phone':<18} {'Status':<14} {'Tag':<15} {'Priority'}")
+    console.print("  " + "─" * 64)
+    for i, acc in enumerate(accounts, 1):
+        st    = acc.get("status","?")
+        col   = "green" if st=="active" else "red"
+        tag   = acc.get("tag","—")
+        prio  = acc.get("priority",0)
+        console.print(
+            f"  {i:<4} {acc['phone']:<18} [{col}]{st:<14}[/{col}] {tag:<15} {prio}"
+        )
     input("\n  Press ENTER...")
 
 
-# ─── Edit Order ──────────────────────────────────────────────────────────────
+# ─── 3. Edit Order ────────────────────────────────────────────────────────────
 
-def edit_order():
-    print_header("✏️  Edit Account Order")
-    accounts = load_accounts()
-    for i, a in enumerate(accounts, 1):
-        console.print(f"  [{i}] {a['phone']}  ({a.get('name','N/A')})")
-
-    console.print("\n  Enter new order (e.g. 3,1,2,4):")
-    new_order = prompt("  Order")
-    try:
-        indices = [int(x.strip()) - 1 for x in new_order.split(",")]
-        reordered = [accounts[i] for i in indices if 0 <= i < len(accounts)]
-        remaining = [a for i, a in enumerate(accounts) if i not in indices]
-        final = reordered + remaining
-        save_accounts(final)
-        print_success("Account order updated.")
-    except Exception as e:
-        print_info(f"Error: {e} — order unchanged.")
-    input("\n  Press ENTER...")
-
-
-# ─── View Usage ──────────────────────────────────────────────────────────────
-
-def view_usage():
-    print_header("📊  Account Limits & Daily Usage")
+def edit_account_order():
+    print_header("✏️  Edit Account Priority")
     accounts = load_accounts()
     if not accounts:
-        print_info("No accounts found.")
+        print_info("No accounts.")
         input("\n  Press ENTER...")
         return
 
-    settings = config.load_settings()
-    daily_imp  = settings.get("daily_import_limit", 20)
-    daily_col  = settings.get("daily_collection_limit", 500)
-    daily_msg  = settings.get("daily_message_limit", 30)
-
-    table = Table(box=box.SIMPLE_HEAVY, border_style="cyan")
-    table.add_column("#",          width=4, justify="right")
-    table.add_column("Account",    width=17, style="bold white")
-    table.add_column("Collection", width=14, justify="right")
-    table.add_column("Imports",    width=12, justify="right")
-    table.add_column("Messages",   width=12, justify="right")
-    table.add_column("Status",     width=20)
-
-    total_col = total_imp = total_msg = 0
     for i, a in enumerate(accounts, 1):
-        tc = a.get("today_collections", 0)
-        ti = a.get("today_imports", 0)
-        tm = a.get("today_messages", 0)
-        total_col += tc; total_imp += ti; total_msg += tm
+        console.print(f"  [{i}] {a['phone']}  priority={a.get('priority',0)}  tag={a.get('tag','—')}")
 
-        st = a.get("status", "unknown")
-        sc = "green" if st == "active" else ("red" if st == "banned" else "yellow")
+    console.print("\n  Edit:")
+    console.print("  [1] Set priority for an account")
+    console.print("  [2] Set tag/category for an account")
+    console.print("  [3] Add note to account")
+    sub = prompt("  Select", "1")
 
-        def _fmt(used, limit):
-            c = "red" if used >= limit else ("yellow" if used >= limit * 0.8 else "green")
-            return f"[{c}]{used}/{limit}[/{c}]" + (" 🔴" if used >= limit else "")
+    phone = prompt("  Account phone number")
+    if not phone:
+        input("\n  Press ENTER...")
+        return
 
-        table.add_row(
-            str(i),
-            a["phone"][-12:],
-            _fmt(tc, daily_col),
-            _fmt(ti, daily_imp),
-            _fmt(tm, daily_msg),
-            f"[{sc}]{status_icon(st)}[/{sc}]",
-        )
-
-    console.print(table)
-    console.print(f"\n  📊 Today's Totals:")
-    console.print(f"  Collection : [cyan]{total_col}[/cyan]  |  Imports : [green]{total_imp}[/green]  |  Messages : [yellow]{total_msg}[/yellow]")
-
-    from modules.utils import now_str
-    from datetime import datetime, timedelta
-    now = datetime.now()
-    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    diff = midnight - now
-    h, rem = divmod(int(diff.total_seconds()), 3600)
-    m = rem // 60
-    console.print(f"\n  ⏱  Counter Reset In: [bold]{h}h {m}m[/bold] (midnight)")
+    if sub == "1":
+        prio = prompt("  New priority (higher = runs earlier)", "0")
+        if prio.lstrip("-").isdigit():
+            from modules.database import update_account
+            update_account(phone, {"priority": int(prio)})
+            print_success(f"Priority set to {prio} for {phone}.")
+    elif sub == "2":
+        console.print("  Tags: [1] scrape  [2] add  [3] messaging  [4] multi")
+        tag_map = {"1":"scrape","2":"add","3":"messaging","4":"multi"}
+        tag = tag_map.get(prompt("  Select","4"),"multi")
+        from modules.database import update_account
+        update_account(phone, {"tag": tag})
+        print_success(f"Tag '{tag}' set for {phone}.")
+    elif sub == "3":
+        note = prompt("  Note")
+        from modules.database import update_account
+        update_account(phone, {"note": note})
+        print_success(f"Note saved for {phone}.")
 
     input("\n  Press ENTER...")
 
 
-# ─── Reset Counters ──────────────────────────────────────────────────────────
+# ─── 4. Usage Panel ───────────────────────────────────────────────────────────
 
-def _reset_counters():
+def account_usage_panel():
+    print_header("📊  Account Usage & Daily Limits")
+    accounts = load_accounts()
+    if not accounts:
+        print_info("No accounts.")
+        input("\n  Press ENTER...")
+        return
+
+    cfg       = config.load_settings()
+    add_lim   = cfg.get("add_limit",    20)
+    scrp_lim  = cfg.get("scrape_limit", 500)
+    msg_lim   = cfg.get("msg_limit",    30)
+
+    console.print(f"  {'Phone':<18} {'Status':<12} {'Added':>8} {'Scraped':>8} {'Msgs':>6} {'Next Reset'}")
+    console.print("  " + "─" * 72)
+
+    from datetime import datetime
+    now_h   = datetime.now().hour
+    now_m   = datetime.now().minute
+    hrs_left = 23 - now_h
+    mins_left= 60 - now_m
+
+    for a in accounts:
+        phone = a.get("phone","?")
+        st    = a.get("status","?")
+        col   = "green" if st=="active" else ("red" if st=="banned" else "yellow")
+        added  = a.get("today_imports",    0)
+        scraped= a.get("today_collections",0)
+        msgs   = a.get("today_messages",   0)
+
+        add_bar  = f"{added}/{add_lim}"
+        scrp_bar = f"{scraped}/{scrp_lim}"
+        msg_bar  = f"{msgs}/{msg_lim}"
+
+        add_col  = "red" if added  >= add_lim  else "green"
+        scrp_col = "red" if scraped>= scrp_lim else "green"
+        msg_col  = "red" if msgs   >= msg_lim  else "green"
+
+        console.print(
+            f"  {phone:<18} [{col}]{st:<12}[/{col}] "
+            f"[{add_col}]{add_bar:>8}[/{add_col}] "
+            f"[{scrp_col}]{scrp_bar:>8}[/{scrp_col}] "
+            f"[{msg_col}]{msg_bar:>6}[/{msg_col}]  "
+            f"[dim]{hrs_left:02d}:{mins_left:02d}[/dim]"
+        )
+
+    console.print(f"\n  Limits per account: Add [bold]{add_lim}[/bold] | Scrape [bold]{scrp_lim}[/bold] | Msg [bold]{msg_lim}[/bold]")
+    console.print(f"  Counters reset at  : [bold]12:00 AM[/bold]")
+    input("\n  Press ENTER...")
+
+
+# ─── 5. Reset Counters ────────────────────────────────────────────────────────
+
+def reset_daily_counters_menu():
+    print_header("🔄  Reset Daily Counters")
     if confirm("  Reset all daily counters for all accounts?"):
+        from modules.database import reset_daily_counters
         reset_daily_counters()
         print_success("Daily counters reset.")
     input("\n  Press ENTER...")
 
 
-# ─── Smart Account Picker ─────────────────────────────────────────────────────
+# ─── 6. Performance Stats ─────────────────────────────────────────────────────
 
-def pick_next_account(accounts: list[dict], mode: str = "smart") -> dict | None:
-    active = [a for a in accounts if a.get("status") == "active"]
-    if not active:
+def rotation_performance_stats():
+    print_header("📈  Rotation Performance Stats")
+    accounts = load_accounts()
+    if not accounts:
+        print_info("No accounts.")
+        input("\n  Press ENTER...")
+        return
+
+    from modules.database import get_week_stats
+    week  = get_week_stats()
+    total_adds = sum(
+        d.get("add",{}).get("success",0) for d in week.values()
+    )
+    total_scrape = sum(
+        d.get("scrape",{}).get("total",0) for d in week.values()
+    )
+
+    active  = sum(1 for a in accounts if a.get("status")=="active")
+    banned  = sum(1 for a in accounts if a.get("status")=="banned")
+    cfg     = config.load_settings()
+    mode    = cfg.get("rotation_mode","smart")
+    trigger = cfg.get("switch_trigger","ops")
+    after   = cfg.get("switch_after_ops",5)
+
+    console.print(f"  Rotation Mode   : [bold cyan]{mode}[/bold cyan]")
+    console.print(f"  Switch Trigger  : [bold]{trigger}[/bold] every {after} ops")
+    console.print(f"  Active Accounts : [green]{active}[/green]")
+    console.print(f"  Banned Accounts : [red]{banned}[/red]")
+    console.print()
+    console.print(f"  ─── This Week ─────────────────────────────────────")
+    console.print(f"  Total Added   : [bold green]{total_adds:,}[/bold green]")
+    console.print(f"  Total Scraped : [bold cyan]{total_scrape:,}[/bold cyan]")
+    if active:
+        console.print(f"  Avg per acct  : [bold]{total_adds//active:,}[/bold] adds  /  [bold]{total_scrape//active:,}[/bold] scraped")
+
+    input("\n  Press ENTER...")
+
+
+# ─── 7. Dry Run ───────────────────────────────────────────────────────────────
+
+def dry_run_test():
+    print_header("🧪  Rotation Dry Run (Test)")
+    console.print("  Simulates which account would be used for each operation.\n")
+    accounts = get_active_accounts()
+    if not accounts:
+        print_info("No active accounts.")
+        input("\n  Press ENTER...")
+        return
+
+    cfg      = config.load_settings()
+    mode     = cfg.get("rotation_mode","smart")
+    after    = cfg.get("switch_after_ops",5)
+    n_ops    = int(prompt("  Simulate how many operations?","20") or 20)
+
+    import random
+    console.print(f"\n  Mode: [cyan]{mode}[/cyan]  |  Switch every [bold]{after}[/bold] ops\n")
+    console.print(f"  {'Op #':<6} {'Account':<18} {'Action'}")
+    console.print("  " + "─" * 45)
+
+    acc_idx = 0
+    for i in range(1, n_ops+1):
+        if mode == "random":
+            acc = random.choice(accounts)
+        else:
+            acc = accounts[(acc_idx) % len(accounts)]
+        if i % after == 0:
+            acc_idx += 1
+
+        op = random.choice(["Add member","Send message","Scrape"])
+        console.print(f"  {i:<6} {acc['phone']:<18} {op}")
+
+    console.print(f"\n  [dim]Dry run complete — no actual operations performed.[/dim]")
+    input("\n  Press ENTER...")
+
+
+# ─── 8. Time Schedule ─────────────────────────────────────────────────────────
+
+def time_schedule_settings():
+    print_header("🕐  Time-Based Rotation Schedule")
+    cfg = config.load_settings()
+
+    console.print("  Define active hours for operations.\n")
+    start_h = prompt("  Start hour (24h, 0–23)", str(cfg.get("active_start_hour",8)))
+    end_h   = prompt("  End hour   (24h, 0–23)", str(cfg.get("active_end_hour",23)))
+
+    if start_h.isdigit() and end_h.isdigit():
+        cfg["active_start_hour"] = int(start_h)
+        cfg["active_end_hour"]   = int(end_h)
+
+    cfg["night_mode"] = confirm("  Enforce Night Mode (12am–7am pause)?", default=cfg.get("night_mode",False))
+
+    rest_min = prompt("  Min rest between accounts (minutes)", str(cfg.get("rest_min_minutes",5)))
+    rest_max = prompt("  Max rest between accounts (minutes)", str(cfg.get("rest_max_minutes",15)))
+    if rest_min.isdigit(): cfg["rest_min_minutes"] = int(rest_min)
+    if rest_max.isdigit(): cfg["rest_max_minutes"] = int(rest_max)
+
+    config.save_settings(cfg)
+    print_success(
+        f"Active hours: {cfg['active_start_hour']}:00 – {cfg['active_end_hour']}:00  |  "
+        f"Rest: {cfg.get('rest_min_minutes',5)}–{cfg.get('rest_max_minutes',15)} min"
+    )
+    input("\n  Press ENTER...")
+
+
+# ─── Rotation Helpers ─────────────────────────────────────────────────────────
+
+def pick_next_account(accounts: list = None, mode: str = None) -> dict | None:
+    """Return the best next account based on current rotation settings."""
+    import random
+    if accounts is None:
+        accounts = get_active_accounts()
+    if not accounts:
         return None
-    if mode == "sequential":
-        return active[0]
-    elif mode == "random":
-        return random.choice(active)
-    elif mode == "weighted":
-        return min(active, key=lambda a: a.get("today_imports", 0))
-    else:  # smart
-        return min(active, key=lambda a: (
-            a.get("today_imports", 0) + a.get("today_collections", 0),
-        ))
+    cfg  = config.load_settings()
+    mode = mode or cfg.get("rotation_mode","smart")
+
+    if mode == "random":
+        return random.choice(accounts)
+    elif mode == "load":
+        return min(accounts, key=lambda a: a.get("today_imports",0) + a.get("today_messages",0))
+    elif mode == "smart":
+        from datetime import datetime
+        def score(a):
+            age_score = 0
+            added_date = a.get("added_date","")
+            if added_date:
+                try:
+                    from datetime import date
+                    days = (date.today() - datetime.strptime(added_date[:10], "%Y-%m-%d").date()).days
+                    age_score = min(days / 30, 10)
+                except Exception:
+                    pass
+            usage_score = -(a.get("today_imports",0) + a.get("today_messages",0))
+            prio_score  = a.get("priority", 0)
+            return age_score + usage_score + prio_score
+        return max(accounts, key=score)
+    else:
+        return accounts[0]
