@@ -165,16 +165,17 @@ def account_performance():
         print_info("No accounts found.")
         input("\n  Press ENTER...")
         return
-    console.print("  Phone              Status      Added   Scraped  Messages  Age")
-    console.print("  " + "─" * 72)
+    console.print("  Phone              Status      Added(today) Scraped(today) Msgs(today)  Age")
+    console.print("  " + "─" * 80)
     for a in accounts:
         phone   = a.get("phone","?")[-12:]
         st      = a.get("status","?")
         col     = "green" if st=="active" else ("red" if st=="banned" else "yellow")
-        added   = a.get("total_added",0)
-        scraped = a.get("total_scraped",0)
-        msgs    = a.get("total_messages",0)
-        added_d = str(a.get("added_date",""))[:10]
+        # الحقول الصحيحة المخزّنة في database
+        added   = a.get("today_imports", 0)
+        scraped = a.get("today_collections", 0)
+        msgs    = a.get("today_messages", 0)
+        added_d = str(a.get("added_at", a.get("added_date", "")))[:10]
         try:
             from datetime import date
             age_days = (date.today() - datetime.strptime(added_d, "%Y-%m-%d").date()).days
@@ -183,7 +184,7 @@ def account_performance():
             age = "—"
         console.print(
             f"  [white]{phone:<18}[/white] [{col}]{st:<10}[/{col}] "
-            f"{added:>7} {scraped:>8} {msgs:>9}  [dim]{age}[/dim]"
+            f"{added:>12} {scraped:>14} {msgs:>11}  [dim]{age}[/dim]"
         )
     input("\n  Press ENTER...")
 
