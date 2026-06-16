@@ -2,6 +2,7 @@
 """
 Telegram Automation Suite v1.0
 Termux Edition — CLI
+By: Akram Haig | +967772009303
 """
 
 import sys
@@ -74,7 +75,7 @@ def print_status_bar():
     console.print("  ┌──────────────────────────────────────────────────────────┐")
     console.print(f"  │  Connected Accounts : [bold green]{active}[/bold green] / {total}   "
                   f"  Banned: [bold red]{banned}[/bold red]   "
-                  f"  Proxies: [bold cyan]{prx_active}[/bold cyan]     │")
+                  f"  Proxies: [bold cyan]{prx_active}[/bold cyan]        │")
     console.print(f"  │  Today — Collected: [cyan]{col_today}[/cyan]   "
                   f"Imported: [green]{imp_today}[/green]   "
                   f"Messages: [yellow]{msg_today}[/yellow]              │")
@@ -103,6 +104,8 @@ def main_menu():
         console.print("  │  [bold cyan][10][/bold cyan]  📢  Outreach Campaigns                                │")
         console.print("  │                                                          │")
         console.print("  │  [dim][ 0]  🚪  Exit[/dim]                                            │")
+        console.print("  ├──────────────────────────────────────────────────────────┤")
+        console.print("  │  [dim]By: Akram Haig  |  +967772009303[/dim]                        │")
         console.print("  └──────────────────────────────────────────────────────────┘")
         console.print()
 
